@@ -1,0 +1,18 @@
+# ---- runtime data (auto-created by server.py; never commit) ----
+output/
+library/
+backgrounds/
+readstate.json
+history.json
+config.json
+backgrounds.json
+
+# ---- python ----
+__pycache__/
+*.pyc
+
+# ---- os / editor ----
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
