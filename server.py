@@ -23,6 +23,7 @@ import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 
 BASE = Path(__file__).resolve().parent
 OUTPUT = BASE / "output"
@@ -311,6 +312,25 @@ SECTION_CHARS = 10000
 HOST = "127.0.0.1"
 PORT = 8765
 
+# When CONFIG["host"] == "0.0.0.0", the server listens on all network
+# interfaces so phones/tablets on the same LAN can open the page too.
+# Default stays loopback-only for privacy (the service has no auth).
+def effective_host():
+    return "0.0.0.0" if CONFIG.get("host") == "0.0.0.0" else HOST
+
+
+def lan_ip():
+    """Best-effort local LAN IPv4 for printing the phone-access URL."""
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return None
+
 # Files larger than this get auto-split by chapter.
 SPLIT_THRESHOLD = 5 * 1024 * 1024      # 5 MB: files larger than this get split
 PART_TARGET_BYTES = 5 * 1024 * 1024    # aim for ~5 MB per part (split at chapter edges)
@@ -348,6 +368,7 @@ CONVERT_SEM = threading.BoundedSemaphore(MAX_CONCURRENT)
 JOB_TTL = 6 * 3600          # 6 hours
 MAX_JOBS = 50
 UPLOAD_MAX_BYTES = 500 * 1024 * 1024   # reject uploads larger than 500 MB
+MAX_FIELD_BYTES = 1024 * 1024          # per-form-field cap (guards memory)
 
 
 def find_ebook_convert():
@@ -410,14 +431,42 @@ def _supports_chapter_pattern():
 SUPPORTS_CHAPTER_PATTERN = bool(EBOOK_CONVERT) and _supports_chapter_pattern()
 
 
+def _encoding_score(s):
+    """Heuristic score for CJK decoding quality. GB18030 can decode almost any
+    byte stream, so Big5 files would silently decode as GBK garbage; score both
+    candidates and pick the better one. Wrong decodes typically produce
+    private-use chars (GB18030's PUA mapping), Bopomofo / small-form punct
+    (Big5 reading of GBK punctuation), or box-drawing glyphs."""
+    cjk = sum(1 for c in s
+              if "\u4e00" <= c <= "\u9fff" or "\u3400" <= c <= "\u4dbf")
+    pua = sum(1 for c in s if 0xE000 <= ord(c) <= 0xF8FF)
+    bopomo = sum(1 for c in s if 0x3100 <= ord(c) <= 0x312F)
+    small = sum(1 for c in s if 0xFE50 <= ord(c) <= 0xFE6F)
+    boxes = sum(1 for c in s if 0x2500 <= ord(c) <= 0x257F)
+    fffd = s.count("\ufffd")
+    return cjk - pua * 4 - bopomo * 8 - small * 8 - boxes * 4 - fffd * 10
+
+
 def read_text_auto(path):
-    """Read a text file, trying UTF-8 (BOM), UTF-8, GBK, then Big5."""
+    """Read a text file: UTF-8 (BOM) first, then pick the best-scoring CJK
+    decode between GB18030 and Big5, falling back to lossy UTF-8."""
     raw = Path(path).read_bytes()
-    for enc in ("utf-8-sig", "utf-8", "gb18030", "big5", "big5hkscs"):
+    for enc in ("utf-8-sig", "utf-8"):
         try:
             return raw.decode(enc), enc
         except UnicodeDecodeError:
             continue
+    best, best_enc, best_score = None, None, None
+    for enc in ("gb18030", "big5", "big5hkscs"):
+        try:
+            dec = raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        sc = _encoding_score(dec)
+        if best is None or sc > best_score:
+            best, best_enc, best_score = dec, enc, sc
+    if best is not None:
+        return best, best_enc
     return raw.decode("utf-8", "replace"), "utf-8"
 
 
@@ -496,7 +545,7 @@ def merge_txt_files(paths, out_path):
 # broke metadata detection for files using the full-width colon).
 _COLON = r"[:\uff1a]"
 TITLE_RES = [
-    re.compile(r"^\s*书\s*名\s*" + _COLON + r"\s*(.+?)\s*$"),
+    re.compile(r"^\s*[书書]\s*名\s*" + _COLON + r"\s*(.+?)\s*$"),
     re.compile(r"^\s*《\s*(.+?)\s*》\s*$"),
 ]
 AUTHOR_RES = [
@@ -504,7 +553,7 @@ AUTHOR_RES = [
     re.compile(r"^\s*著\s*者\s*" + _COLON + r"\s*(.+?)\s*$"),
 ]
 INTRO_RES = [
-    re.compile(r"^\s*(?:简\s*介|内容简介|简\s*述)\s*" + _COLON + r"\s*(.+?)\s*$"),
+    re.compile(r"^\s*(?:[简簡]\s*介|内[容內]\s*[简簡]介|[简簡]\s*述)\s*" + _COLON + r"\s*(.+?)\s*$"),
 ]
 
 
@@ -659,10 +708,17 @@ def _clean_ad_lines(text):
         if not s:
             out.append(ln)
             continue
-        # URL-ish line: one token, no CJK, contains a dot, short
+        # URL-ish line: one token, no CJK, short, and must actually look like
+        # a URL (scheme / www. / known TLD) so plain lines like "2026.08.11"
+        # or "e.g." are never mistaken for ads.
+        _low = s.lower()
         is_urlish = (
             len(s) < 100 and " " not in s and "." in s
             and not any("\u4e00" <= c <= "\u9fff" for c in s)
+            and (_low.startswith(("http://", "https://", "www."))
+                 or re.search(
+                     r"\.(?:com|net|org|cn|cc|top|xyz|info|biz|me|tv|io|html?|php|txt)$",
+                     _low))
         )
         if _AD_LINE_RE.match(s) or is_urlish:
             removed += 1
@@ -1067,7 +1123,10 @@ def _run_conversion_body(job_id, src_path, fmt, stem, job_dir, nosplit=False,
                     out_path.unlink()
                 build_path.rename(out_path)
             if fmt == "kfx":
-                shutil.rmtree(kfx_dir, ignore_errors=True)
+                # Keep Previewer sidecar files (cover thumbnails etc.): kfx_dir
+                # stays inside the job dir and is removed with it after the
+                # retention period.
+                pass
 
             out_files.append(out_path)
             # progress: leave last 5% for packaging
@@ -1086,7 +1145,7 @@ def _run_conversion_body(job_id, src_path, fmt, stem, job_dir, nosplit=False,
         if len(out_files) == 1:
             final = out_files[0]
             _finish_job(job_id, status="done", progress=100,
-                        download=f"/download/{job_id}/{final.name}",
+                        download=f"/download/{job_id}/{quote(final.name)}",
                         filename=final.name,
                         size=final.stat().st_size,
                         is_zip=False,
@@ -1099,7 +1158,7 @@ def _run_conversion_body(job_id, src_path, fmt, stem, job_dir, nosplit=False,
                 for f in out_files:
                     zf.write(f, f.name)
             _finish_job(job_id, status="done", progress=100,
-                        download=f"/download/{job_id}/{zip_name}",
+                        download=f"/download/{job_id}/{quote(zip_name)}",
                         filename=zip_name,
                         size=zip_path.stat().st_size,
                         is_zip=True,
@@ -1270,6 +1329,7 @@ class Handler(BaseHTTPRequestHandler):
                 for base in output_dirs():
                     for d in base.iterdir():
                         if (d.is_dir() and _is_job_dir_name(d.name)
+                                and (d / ".txt2ebook_job").is_file()
                                 and d.name not in live):
                             try:
                                 freed += sum(f.stat().st_size
@@ -1384,6 +1444,10 @@ class Handler(BaseHTTPRequestHandler):
         job_id = uuid.uuid4().hex
         job_dir = output_base() / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            (job_dir / ".txt2ebook_job").write_text("1")
+        except OSError:
+            pass
         try:
             fields, files = stream_multipart(
                 self.rfile, length, boundary.encode("utf-8"), job_dir)
@@ -1528,10 +1592,14 @@ class Handler(BaseHTTPRequestHandler):
             shutil.rmtree(job_dir, ignore_errors=True)
 
     def handle_get_config(self):
-        """Return the current output directory setting."""
+        """Return the current output directory + LAN-access setting."""
         self._json(200, {"ok": True,
                          "output_dir": CONFIG.get("output_dir") or "",
-                         "effective": str(output_base())})
+                         "effective": str(output_base()),
+                         "lan": CONFIG.get("host") == "0.0.0.0",
+                         "lan_ip": (lan_ip()
+                                    if CONFIG.get("host") == "0.0.0.0"
+                                    else None)})
 
     def handle_set_config(self):
         """Change the output directory (absolute path; empty = default)."""
@@ -1546,6 +1614,21 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 data = {}
         od = (data.get("output_dir") or "").strip().strip('"')
+        lan = data.get("lan")
+        if lan is not None:
+            # LAN access toggle: needs a server restart to take effect (the
+            # socket bind happens in main()). Store it and tell the UI.
+            lan_on = (lan is True
+                      or str(lan).strip().lower() in ("1", "true", "on", "yes"))
+            if lan_on:
+                CONFIG["host"] = "0.0.0.0"
+            else:
+                CONFIG.pop("host", None)
+            save_config()
+            self._json(200, {"ok": True, "restart": True,
+                             "lan": lan_on,
+                             "lan_ip": lan_ip() if lan_on else None})
+            return
         if od:
             p = Path(od).expanduser()
             if not p.is_absolute():
@@ -1694,15 +1777,18 @@ class Handler(BaseHTTPRequestHandler):
             size = p.stat().st_size
             rng = self.headers.get("Range")
             if rng and ctype.startswith("video/"):
-                m = re.match(r"bytes=(\d*)-(\d*)", rng.strip())
-                start = end = None
-                if m:
-                    if m.group(1):
-                        start = int(m.group(1))
-                    if m.group(2):
-                        end = int(m.group(2))
+                m = re.match(r"bytes=(\d*)-(\d*)\s*$", rng.strip())
+                if not m or (not m.group(1) and not m.group(2)):
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.end_headers()
+                    return
+                start = int(m.group(1)) if m.group(1) else None
+                end = int(m.group(2)) if m.group(2) else None
                 if start is None:
-                    start = 0
+                    # suffix range "bytes=-N": serve the last N bytes
+                    start = max(0, size - end)
+                    end = size - 1
                 if end is None or end >= size:
                     end = size - 1
                 if start > end or start >= size:
@@ -1947,7 +2033,7 @@ class Handler(BaseHTTPRequestHandler):
                 "title": first_stem,
                 "filename": out_name,
                 "size": out_path.stat().st_size,
-                "download": f"/download/{job_id}/{out_name}",
+                "download": f"/download/{job_id}/{quote(out_name)}",
                 "saved": True,
             }
             HISTORY[job_id] = {
@@ -1955,13 +2041,13 @@ class Handler(BaseHTTPRequestHandler):
                 "title": first_stem, "filename": out_name,
                 "status": "done", "progress": 100,
                 "size": out_path.stat().st_size,
-                "download": f"/download/{job_id}/{out_name}",
+                "download": f"/download/{job_id}/{quote(out_name)}",
                 "created": JOBS[job_id]["created"],
             }
             _save_history_locked()
         self._json(200, {
             "ok": True,
-            "download": f"/download/{job_id}/{out_name}",
+            "download": f"/download/{job_id}/{quote(out_name)}",
             "filename": out_name,
             "size": out_path.stat().st_size,
             "merged_from": len(files),
@@ -2211,6 +2297,8 @@ def stream_multipart(rfile, length, boundary, file_dir):
                         fout.write(chunk)
                     else:
                         collected += chunk
+                        if len(collected) > MAX_FIELD_BYTES:
+                            raise ValueError("\u8868\u5355\u5b57\u6bb5\u8fc7\u5927")
                     buf = buf[pos + len(sep):]
                     break
                 # Not found yet: flush all but a tail that could straddle the
@@ -2222,6 +2310,8 @@ def stream_multipart(rfile, length, boundary, file_dir):
                         fout.write(flush)
                     else:
                         collected += flush
+                        if len(collected) > MAX_FIELD_BYTES:
+                            raise ValueError("\u8868\u5355\u5b57\u6bb5\u8fc7\u5927")
                     buf = buf[-keep:]
                     search_from = 0
                 more = _read_more()
@@ -2231,6 +2321,8 @@ def stream_multipart(rfile, length, boundary, file_dir):
                         fout.write(buf)
                     else:
                         collected += buf
+                        if len(collected) > MAX_FIELD_BYTES:
+                            raise ValueError("\u8868\u5355\u5b57\u6bb5\u8fc7\u5927")
                     buf = b""
                     break
                 buf += more
@@ -2384,7 +2476,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     margin:0; font-family:-apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;
     background:var(--bg); color:var(--fg);
   }
-  .app { display:flex; flex-direction:column; height:100vh; max-width:1700px; margin:0 auto; }
+  .app { display:flex; flex-direction:column; height:100vh; }
 
   /* ================= Header ================= */
   .hd {
@@ -2400,6 +2492,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
     border:1px solid var(--accent); color:var(--accent); font-size:12px; font-weight:700;
     background:var(--accent-soft); animation:festPulse 2s infinite; white-space:nowrap;
   }
+  .lanchip {
+    display:none; align-items:center; gap:4px; padding:4px 12px; border-radius:999px;
+    border:1px solid var(--accent); color:var(--accent); font-size:12px; font-weight:700;
+    background:var(--accent-soft); white-space:nowrap; cursor:pointer;
+  }
+  .lanchip.show { display:inline-flex; }
   @keyframes festPulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.07)} }
   .rain { position:fixed; top:-50px; z-index:99; pointer-events:none; animation:fall 9s linear infinite; opacity:.85; }
   @keyframes fall { to { transform:translateY(115vh) rotate(360deg); } }
@@ -2783,6 +2881,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <h1 class="logo">📚 TXT → 电子书</h1>
     <span class="tag" data-i18n="tag"></span>
     <span class="festchip" id="festChip"></span>
+    <span class="lanchip" id="lanChip" title=""></span>
     <span class="sp"></span>
     <button class="langbtn" id="readerBtn" title="阅读">📖</button>
     <div class="themewrap">
@@ -2925,6 +3024,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
           <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
             <input type="checkbox" id="remindCb"> <span data-i18n="advRemind"></span>
           </label>
+        </div>
+        <div class="advrow">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" id="lanCb"> <span data-i18n="advLan"></span>
+          </label>
+          <span class="note" data-i18n="advLanNote" id="lanNote"></span>
         </div>
       </details>
     </section>
@@ -3080,7 +3185,7 @@ const I18N = {
     splitMb: '每本拆分大小', splitMbNote: 'MB(超过才拆分,在章节边界切分)',
     autoSec: '自动补充分节', autoSecNote: 'TXT 没有章节标题时,每约 1 万字插入"第N节",自动生成目录并支持拆分',
     cleanAds: '清理广告/水印行', cleanAdsNote: '自动删除"请收藏本站"、网址等常见小说网站垃圾行',
-    coverBtn: '🖼 自定义封面(可选)', adv: '高级设置', advOutDir: '输出目录', advOutSave: '保存', advOutDirNote: '留空 = 程序目录下 output;保存后新任务输出到该目录(旧文件仍在原处可下载)', advRe: '章节规则(正则)', advReNote: '留空=自动识别;示例: ^第.+[章节回卷]', advReReset: '默认', advRetention: '文件保留', advRemind: '完成提醒(提示音+系统通知)',
+    coverBtn: '🖼 自定义封面(可选)', adv: '高级设置', advOutDir: '输出目录', advOutSave: '保存', advOutDirNote: '留空 = 程序目录下 output;保存后新任务输出到该目录(旧文件仍在原处可下载)', advRe: '章节规则(正则)', advReNote: '留空=自动识别;示例: ^第.+[章节回卷]', advReReset: '默认', advRetention: '文件保留', advRemind: '完成提醒(提示音+系统通知)', advLan: '允许手机/平板访问(同一WiFi)', advLanNote: '开启后需重启服务;手机打开下方地址即可', advLanNeedRestart: '已开启,重启服务后生效', advLanOff: '已关闭,仅本机可访问', lanChipTip: '点击复制手机访问地址', lanCopied: '已复制',
     pvHead: '转换预览', pvRefresh: '🔄 重新分析', pvTitle: '书名', pvAuthor: '作者',
     pvBig: '文件较大,已跳过自动预览(可直接转换)', pvLoading: '分析中...', pvNonTxt: '电子书输入,将直接转换格式:',
     pvChars: '字数', pvChapters: '章节', pvParts: '预计', pvAds: '清理广告', pvAutoSec: '自动分节', pvIntro: '简介',
@@ -3106,7 +3211,7 @@ const I18N = {
     splitMb: 'Volume size', splitMbNote: 'MB (split only when larger; cuts at chapter edges)',
     autoSec: 'Auto-add sections', autoSecNote: 'No chapter headings? Insert "Section N" every ~10k chars for a TOC and splitting',
     cleanAds: 'Remove ad/watermark lines', cleanAdsNote: 'Strips "please bookmark" lines, URLs and other site junk',
-    coverBtn: '🖼 Custom cover (optional)', adv: 'Advanced', advOutDir: 'Output folder', advOutSave: 'Save', advOutDirNote: 'leave empty = output/ next to the program; new jobs go there (old files stay downloadable)', advRe: 'Chapter rule (regex)', advReNote: 'leave empty = auto; e.g. ^Chapter [0-9]+', advReReset: 'Reset', advRetention: 'Keep files', advRemind: 'Completion alert (sound + notification)',
+    coverBtn: '🖼 Custom cover (optional)', adv: 'Advanced', advOutDir: 'Output folder', advOutSave: 'Save', advOutDirNote: 'leave empty = output/ next to the program; new jobs go there (old files stay downloadable)', advRe: 'Chapter rule (regex)', advReNote: 'leave empty = auto; e.g. ^Chapter [0-9]+', advReReset: 'Reset', advRetention: 'Keep files', advRemind: 'Completion alert (sound + notification)', advLan: 'Allow phone/tablet access (same WiFi)', advLanNote: 'restart required; open the address below on your phone', advLanNeedRestart: 'Enabled - works after restart', advLanOff: 'Disabled - local only', lanChipTip: 'Click to copy the phone URL', lanCopied: 'copied',
     pvHead: 'Preview', pvRefresh: '🔄 Re-analyze', pvTitle: 'Title', pvAuthor: 'Author',
     pvBig: 'Large file: preview skipped (convert directly)', pvLoading: 'Analyzing...', pvNonTxt: 'Ebook input, direct conversion:',
     pvChars: 'chars', pvChapters: 'chapters', pvParts: '≈', pvAds: 'ads removed', pvAutoSec: 'auto sections', pvIntro: 'Intro',
@@ -3608,9 +3713,29 @@ remindCb.addEventListener('change', savePrefs);
 reReset.addEventListener('click', () => { chapterRe.value = ''; savePrefs(); schedulePreview(); });
 syncSplitRow();
 
-// ---- output directory ----
+// ---- output directory + LAN access ----
+const lanCb = document.getElementById('lanCb');
+const lanNote = document.getElementById('lanNote');
+const lanChip = document.getElementById('lanChip');
+function showLanChip(ip) {
+  const url = ip ? ('http://' + ip + ':' + (window.location.port || '8765')) : '';
+  if (!url) { lanChip.classList.remove('show'); return; }
+  lanChip.textContent = '📱 ' + url;
+  lanChip.title = t('lanChipTip');
+  lanChip.classList.add('show');
+}
+lanChip.addEventListener('click', async () => {
+  const url = lanChip.textContent.replace(/^📱\s*/, '').trim();
+  if (!url) return;
+  try { await navigator.clipboard.writeText(url); } catch (e) {}
+  const old = lanChip.textContent;
+  lanChip.textContent = '✅ ' + t('lanCopied');
+  setTimeout(() => { lanChip.textContent = old; }, 1500);
+});
 fetch('/config').then(r => r.json()).then(c => {
   if (c.ok) outDirInput.value = c.output_dir || '';
+  if (lanCb && c.lan !== undefined) lanCb.checked = !!c.lan;
+  showLanChip(c.lan ? (c.lan_ip || '') : '');
 }).catch(() => {});
 outDirSave.addEventListener('click', async () => {
   outDirSave.disabled = true;
@@ -3629,6 +3754,37 @@ outDirSave.addEventListener('click', async () => {
     status.textContent = '❌ ' + e.message;
   } finally {
     outDirSave.disabled = false;
+  }
+});
+if (lanCb) lanCb.addEventListener('change', async () => {
+  lanCb.disabled = true;
+  try {
+    const r = await fetch('/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lan: lanCb.checked }),
+    });
+    const c = await r.json();
+    if (!c.ok) throw new Error(c.error || '');
+    if (c.restart) {
+      status.className = 'status ok';
+      if (c.lan) {
+        const ip = c.lan_ip || window.location.hostname;
+        status.innerHTML = '✅ ' + t('advLanNeedRestart')
+          + ' <b>http://' + esc(ip) + ':8765</b>';
+        showLanChip(ip);
+      } else {
+        status.className = 'status ok';
+        status.textContent = '✅ ' + t('advLanOff');
+        showLanChip('');
+      }
+    }
+  } catch (e) {
+    lanCb.checked = !lanCb.checked;
+    status.className = 'status err';
+    status.textContent = '❌ ' + e.message;
+  } finally {
+    lanCb.disabled = false;
   }
 });
 
@@ -4468,6 +4624,11 @@ def prune_stale_outputs():
         for d in base.iterdir():
             if not d.is_dir() or not _is_job_dir_name(d.name):
                 continue
+            # Only real job dirs are touched: ours carry a marker file, older
+            # ones are tracked in HISTORY. A user folder that merely happens
+            # to be named like a job id is never deleted.
+            if not (d / ".txt2ebook_job").is_file() and d.name not in HISTORY:
+                continue
             try:
                 age = now - d.stat().st_mtime
             except OSError:
@@ -4496,8 +4657,13 @@ def main():
         # loudly instead so a duplicate server can't cause confusing behavior.
         allow_reuse_address = False
 
-    srv = Txt2EbookServer((HOST, PORT), Handler)
+    host = effective_host()
+    srv = Txt2EbookServer((host, PORT), Handler)
     print(f"txt2ebook running at http://{HOST}:{PORT}")
+    if host != HOST:
+        ip = lan_ip()
+        print(f"局域网访问已开启: 手机/平板连接同一 WiFi 后打开")
+        print(f"  http://{ip or '<本机IP>'}:{PORT}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
