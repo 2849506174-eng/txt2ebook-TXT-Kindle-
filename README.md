@@ -38,8 +38,16 @@ python server.py
 > 浏览器渲染组件(Playwright)不需要时完全不装——纯静态站照常抓。
 > 需要时运行 **`install_render.bat`**:自动装 Playwright;检测到系统 Chrome/Edge 就直接用(零下载),都没有才下载 Chromium(~150MB)。
 
-### 升级(装过旧版)
-双击 **`update.bat`**(git 克隆版)或手动从 GitHub 下载最新 `server.py` 与 `sources/` 覆盖。**升级不会动你的数据**:`library/`(书库)、`output/`(成品)、`config.json`(设置)、`history.json`(记录)都保留。
+### 升级(装过旧版 / 其他人装了旧版)
+
+**不需要专门更新脚本——覆盖安装即可**:
+
+1. 拿到新版文件(`server.py` + `sources/` 文件夹,从 GitHub 下载或朋友/网盘拷贝);
+2. 把新版 `server.py` 和 `sources/` 直接复制覆盖到程序目录(保留 `library/`、`output/`、`config.json`、`history.json` 不动);
+3. 双击 **`start.bat`** 重新启动——它会检测到 Python/Calibre 已装而跳过安装,直接运行新版本。
+
+> 覆盖时如提示文件被占用,先关闭服务窗口(或重启电脑)再覆盖。
+> 用户数据(书库/成品/设置/记录)始终在程序目录中,覆盖不会影响。
 
 ### 卸载
 双击 **`uninstall.bat`**,按提示勾选:

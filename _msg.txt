@@ -1,9 +1,0 @@
-新增离线更新脚本:不上 GitHub 也能升级
-
-- update_from_zip.bat:从本地 ZIP 覆盖升级(网盘/QQ/朋友拷贝的新版 zip)
-  - 自动找 zip(当前目录/桌面/下载,或拖拽到脚本上)
-  - 解压 -> 复制 server.py + sources/ + 辅助脚本覆盖
-  - 保留 library/ output/ config.json history.json(数据不动)
-  - 自动停服务,免锁文件
-- 卸载程序本就不依赖网络:uninstall.bat 纯本地运行
-- 实测:zip 解压覆盖 server.py/sources 正确,数据保留
