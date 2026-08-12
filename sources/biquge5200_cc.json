@@ -9,8 +9,18 @@
     "dedupe": "keep_last"
   },
   "chapter": {
-    "title": [{"tag": "h1"}],
-    "content": [{"tag": "div", "id": "content"}],
+    "title": [
+      {
+        "tag": "h1"
+      }
+    ],
+    "content": [
+      {
+        "tag": "div",
+        "id": "content"
+      }
+    ],
     "pagination": true
-  }
+  },
+  "bing_site": true
 }

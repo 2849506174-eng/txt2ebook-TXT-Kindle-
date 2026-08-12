@@ -1219,13 +1219,16 @@ def _toc_pages(base_url, html_text, pages_cfg, visited):
 
 def _chapter_pages(base_url, html_text):
     """Additional page URLs for a multi-page chapter (x.html -> x_2.html,
-    x_3.html ...), plus any link explicitly labelled 下一页/下页."""
+    x_3.html ...). Same-stem numeric links are authoritative; the 下一页/下页
+    text fallback is only used when the chapter has no same-stem paging (so a
+    "next chapter" link is never mistaken for a page of this chapter)."""
     pages = []
     path = urlparse(base_url).path
     stem = path.rsplit("/", 1)[-1]
     stem_noext, ext = os.path.splitext(stem)
     if not stem_noext:
         return pages
+    text_hits = []
     for m in re.finditer(
             r'<a[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>([^<]{1,20})</a>',
             html_text, re.I):
@@ -1239,7 +1242,9 @@ def _chapter_pages(base_url, html_text):
             pages.append((int(mm.group(1)), urljoin(base_url, href)))
         elif tx in ("下一页", "下页", "第2页") \
                 and not href.lower().startswith(("javascript:", "#")):
-            pages.append((999, urljoin(base_url, href)))
+            text_hits.append(urljoin(base_url, href))
+    if not pages:
+        pages = [(999 + i, u) for i, u in enumerate(text_hits)]
     pages.sort(key=lambda x: x[0])
     out = []
     for _n, u in pages:
@@ -1469,6 +1474,19 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
             elif _looks_obfuscated(body):
                 skipped.append((ch_title, "疑似字体反爬"))
                 body = None
+            else:
+                # multi-page chapters: follow xxx_2.html / xxx-2.html
+                for pu in _chapter_pages(ch_url, html_c):
+                    if _is_cancelled(job_id):
+                        raise GrabError("cancelled")
+                    try:
+                        raw_p, _ = _http_fetch(pu, job_id, referer=ch_url)
+                        html_p = decode_web_bytes(raw_p, enc)
+                        _t, part = _extract_chapter(html_p, source, pu)
+                        if part and not _looks_obfuscated(part):
+                            body = body.rstrip() + "\n\n" + part.strip()
+                    except GrabError:
+                        continue
         except GrabError as e:
             skipped.append((ch_title, str(e)))
             body = None
@@ -1496,6 +1514,66 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
     return {"title": book_title, "author": author, "text": text,
             "chapters": len(parts), "skipped": skipped,
             "ads_removed": ads_total, "chapter_titles": [p.split("\n", 1)[0] for p in parts]}
+
+
+def _bing_site_search(domain, kw):
+    """Bing site: search as a fallback for sources without their own search.
+    Returns [{title, author, url}] for result links on the given domain."""
+    q = quote(f"{kw} site:{domain}")
+    url = "https://www.bing.com/search?q=" + q
+    try:
+        raw, _final = _http_fetch(url)
+    except GrabError:
+        return []
+    text = decode_web_bytes(raw)
+    out = []
+    seen = set()
+    for m in re.finditer(r'<li class="b_algo".*?</li>', text, re.S):
+        blk = m.group(0)
+        m2 = re.search(r'<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', blk, re.S)
+        if not m2:
+            continue
+        href = m2.group(1).strip()
+        title = _norm_line(re.sub(r"<[^>]+>", " ", m2.group(2)))
+        if domain not in href or not href.startswith(("http://", "https://")):
+            continue
+        if any(b in href for b in ("/author", "/zuozhe", "/tag", "/top",
+                                   "/sort", "/fenlei", "/quanben", ".html")):
+            continue  # not a book TOC page
+        clean = _clean_page_title(title)
+        if not clean:
+            continue
+        author = ""
+        m3 = re.search(r"<p[^>]*>(.*?)</p>", blk, re.S)
+        if m3:
+            cap = _norm_line(re.sub(r"<[^>]+>", " ", m3.group(1)))
+            am = re.search(r"([\u4e00-\u9fff·]{2,12})\s+(?:玄幻|仙侠|都市|科幻|言情|历史|游戏|灵异|悬疑|网游|体育|军事)", cap)
+            if am and am.group(1) != clean:
+                author = am.group(1)
+        u = href.split("?")[0]
+        if u in seen:
+            continue
+        seen.add(u)
+        out.append({"title": clean, "author": author, "url": u})
+    return out
+
+
+def _search_rank(hit, kw):
+    """Rank search hits: exact match > prefix > contains; author match adds
+    points; longer (often fanfic) titles lose a little."""
+    t = (hit.get("title") or "").lower()
+    k = kw.lower()
+    score = 10
+    if t == k:
+        score = 100
+    elif t.startswith(k):
+        score = 80
+    elif k in t:
+        score = 60
+    if k in (hit.get("author") or "").lower():
+        score += 15
+    score -= min(len(t), 40) * 0.3
+    return score
 
 
 def _parse_search(html_text, source):
@@ -3101,19 +3179,26 @@ class Handler(BaseHTTPRequestHandler):
         for s in SOURCES.values():
             if source_id and s["id"] != source_id:
                 continue
-            scfg = s.get("search")
-            if not scfg or not scfg.get("url"):
-                continue
-            try:
-                url = scfg["url"].replace("{kw}", quote(kw))
-                raw, _final = _http_fetch(url)
-                text = decode_web_bytes(raw, s.get("encoding"))
-                for h in _parse_search(text, s):
+            scfg = s.get("search") or {}
+            if scfg.get("url"):
+                try:
+                    url = scfg["url"].replace("{kw}", quote(kw))
+                    raw, _final = _http_fetch(url)
+                    text = decode_web_bytes(raw, s.get("encoding"))
+                    for h in _parse_search(text, s):
+                        h["source_id"] = s["id"]
+                        h["source"] = s.get("name") or s["id"]
+                        results.append(h)
+                except GrabError:
+                    pass
+            # sources without their own search: fall back to Bing site:
+            if s.get("bing_site") and not source_id:
+                dom = urlparse((s.get("home") or "")).netloc or s.get("id")
+                for h in _bing_site_search(dom, kw):
                     h["source_id"] = s["id"]
                     h["source"] = s.get("name") or s["id"]
                     results.append(h)
-            except GrabError:
-                continue
+        results.sort(key=lambda h: _search_rank(h, kw), reverse=True)
         self._json(200, {"ok": True, "q": kw, "results": results})
 
     def handle_grab(self):
@@ -5480,20 +5565,14 @@ function handleGrabUpdate(j) {
     cancelBtn.classList.remove('show');
     const mb = (j.size / 1048576).toFixed(2);
     const links = [];
-    if (j.book_id) links.push('<a class="dl" href="#" data-act="read">📖 ' + esc(t('webRead')) + '</a>');
+    if (j.book_id) links.push('<a class="dl" href="#" data-act="read" data-bid="' + esc(j.book_id) + '">📖 ' + esc(t('webRead')) + '</a>');
     links.push('<a class="dl" href="' + esc(j.download) + '">⬇ ' + esc(t('download')) + ' TXT</a>');
-    if (j.book_id) links.push('<a class="dl" href="#" data-act="conv">⚡ ' + esc(t('webConvert')) + '</a>');
+    if (j.book_id) links.push('<a class="dl" href="#" data-act="conv" data-bid="' + esc(j.book_id) + '">⚡ ' + esc(t('webConvert')) + '</a>');
     const html = '✅ ' + esc(j.message || t('webDone')) + ' (' + mb + ' MB)<br>' + links.join(' &nbsp; ');
     grabStatus.className = 'grabstatus ok';
     grabStatus.innerHTML = html;
     status.className = 'status ok';
     status.innerHTML = html;
-    if (j.book_id) {
-      const rd = grabStatus.querySelector('[data-act=read]');
-      if (rd) rd.onclick = (e) => { e.preventDefault(); reopenGrabBook(j.book_id); };
-      const cv = grabStatus.querySelector('[data-act=conv]');
-      if (cv) cv.onclick = (e) => { e.preventDefault(); convertGrabBook(j.book_id); };
-    }
   } else if (j.status === 'error' || j.status === 'cancelled') {
     grabBtn.disabled = false;
     grabCancelBtn.style.display = 'none';
@@ -5578,6 +5657,18 @@ async function doSearch() {
     grabSearchResults.innerHTML = '<div class="gshint">❌ ' + esc(t('webSearchFail')) + ': ' + esc(e.message) + '</div>';
   }
 }
+
+// delegate clicks on 阅读/转电子书 links (they appear in the reader panel
+// AND the main status area, so a single delegated handler covers both)
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-act]');
+  if (!el) return;
+  e.preventDefault();
+  const bid = el.dataset.bid;
+  if (!bid) return;
+  if (el.dataset.act === 'read') reopenGrabBook(bid);
+  else if (el.dataset.act === 'conv') convertGrabBook(bid);
+});
 
 grabCancelBtn.addEventListener('click', async () => {
   if (!grabJobId) return;
