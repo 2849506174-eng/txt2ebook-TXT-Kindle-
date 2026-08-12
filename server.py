@@ -3841,11 +3841,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .ropenbox { width:100%; max-width:520px; }
   .ropenbox h2 { margin:0 0 8px; font-size:20px; }
   .rnote { color:var(--muted); font-size:13px; margin:0 0 18px; line-height:1.6; }
-  .rurlrow { display:flex; gap:8px; margin-top:14px; }
-  .rurlrow input {
-    flex:1; padding:10px 12px; border:1px solid var(--border); border-radius:10px;
-    background:var(--card2); color:var(--fg); font-size:13px;
-  }
   .rrecent { margin-top:16px; }
   .rrecenthead { font-size:12px; font-weight:700; color:var(--muted); margin-bottom:8px; }
   .rbook { display:flex; align-items:center; gap:8px; padding:8px 10px; margin-bottom:6px; background:var(--card2); border:1px solid var(--border); border-radius:9px; font-size:12px; }
@@ -3912,10 +3907,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
     white-space:pre-wrap; word-break:break-all;
   }
   .grabLog.show { display:block; }
-  .rurlrow { display:flex; gap:8px; margin:12px 0; align-items:center; }
-  .rurllabel { font-size:12px; color:var(--muted); white-space:nowrap; }
+  .rurlrow { margin:12px 0; }
   .rurlrow input {
-    flex:1; min-width:0; padding:11px 13px; border-radius:10px;
+    width:100%; box-sizing:border-box; padding:11px 13px; border-radius:10px;
     border:1px solid var(--border); background:var(--card); color:var(--fg);
     font-size:14px; min-height:44px;
   }
@@ -4180,8 +4174,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <button class="btn" id="rLocal" data-i18n="rLocalBtn"></button>
       <input type="file" id="rFile" accept=".txt,.zip" hidden>
       <div class="rurlrow">
-        <span class="rurllabel" data-i18n="rUrlLabel"></span>
         <input type="url" id="rUrl" placeholder="" autocomplete="off" spellcheck="false" data-tip="tipReaderUrl">
+      </div>
+      <div class="rurlrow">
         <button class="btn" id="rUrlGo" data-i18n="rUrlGoBtn" data-tip="tipReaderUrl"></button>
       </div>
       <div class="rrecent">
