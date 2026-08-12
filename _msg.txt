@@ -1,13 +1,9 @@
-新增卸载程序(uninstall)与升级/可选依赖脚本
+新增离线更新脚本:不上 GitHub 也能升级
 
-- uninstall.bat + uninstall.py:双击卸载,交互式勾选
-  - 停止运行中的服务(只杀 server.py 进程,不误伤其他 python)
-  - 是否删除本地数据(书库/输出/记录/配置/背景,可选保留)
-  - 依赖逐项勾选卸载:Playwright(含 Chromium 内核缓存)/ Calibre / Python 3.13
-  - 最后删除程序文件,保留 uninstall 脚本供手动清理
-- install_render.bat:可选安装浏览器渲染组件
-  - 装 Playwright(小);检测系统 Chrome/Edge,有则零下载直接用,
-    都没有才下载 Chromium(~150MB)
-- update.bat:git 版一键升级(git pull,自动停服务,数据不受影响);
-  非 git 用户提示手动替换 server.py + sources/
-- README 新增「安装/升级/卸载」章节:依赖大小表、可选组件说明
+- update_from_zip.bat:从本地 ZIP 覆盖升级(网盘/QQ/朋友拷贝的新版 zip)
+  - 自动找 zip(当前目录/桌面/下载,或拖拽到脚本上)
+  - 解压 -> 复制 server.py + sources/ + 辅助脚本覆盖
+  - 保留 library/ output/ config.json history.json(数据不动)
+  - 自动停服务,免锁文件
+- 卸载程序本就不依赖网络:uninstall.bat 纯本地运行
+- 实测:zip 解压覆盖 server.py/sources 正确,数据保留
