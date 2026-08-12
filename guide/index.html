@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>txt2ebook 使用教程</title>
+<style>
+  body { margin:0; background:#0f1115; color:#e8eaed; font-family:-apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:24px 16px 80px; }
+  h1 { font-size:26px; }
+  h2 { margin-top:48px; padding:8px 14px; background:#1a1d24; border-left:4px solid #4f8cff; border-radius:8px; font-size:19px; }
+  h3 { color:#4f8cff; margin-top:28px; }
+  img { max-width:100%; border:1px solid #2a2e37; border-radius:10px; margin:8px 0; display:block; }
+  .note { background:#1c211a; border:1px solid #3a4a2e; border-radius:10px; padding:10px 14px; font-size:14px; line-height:1.8; margin:10px 0; }
+  .warn { background:#241a1a; border:1px solid #5a2e2e; border-radius:10px; padding:10px 14px; font-size:14px; line-height:1.8; margin:10px 0; }
+  ol, ul { line-height:1.9; }
+  code { background:#22262e; padding:2px 6px; border-radius:5px; font-size:13px; }
+  .kbd { background:#22262e; border:1px solid #3a3f4a; border-radius:5px; padding:1px 7px; font-size:12px; }
+  .cap { font-size:12px; color:#9aa0a6; margin:2px 0 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>📚 txt2ebook 使用教程</h1>
+<p style="color:#9aa0a6">本地 TXT → 电子书转换 + 网页小说抓取。所有文件都在本机处理,不上传任何外部服务器。</p>
+
+<h2>① 打开与访问</h2>
+<ol>
+  <li>双击 <code>start.bat</code> 启动(首次自动安装 Python 和 Calibre,需联网)</li>
+  <li>电脑浏览器打开 <code>http://127.0.0.1:8765</code></li>
+  <li>手机访问:顶栏 🐱 主题面板 → 高级设置 → 勾选「允许手机/平板访问」→ 重启服务 → 顶栏显示手机地址(形如 http://192.168.x.x:8765),点击复制</li>
+</ol>
+<div class="warn">⚠️ 注意:服务默认仅本机可访问(隐私);开启手机访问后,同一 WiFi 下的设备都能打开页面(无登录,请勿在公共网络开启)。手机地址是 DHCP 分配的,重启路由可能变化。</div>
+
+<h2>② 转换 TXT 为电子书(主页)</h2>
+<img src="01_home.png" alt="主页">
+<ol>
+  <li>点击或拖拽 TXT 文件到左侧「① 选择文件」(支持多选,自动按文件名数字排序合并)</li>
+  <li>选格式:MOBI(所有 Kindle)/ AZW / AZW3 / EPUB / KFX / TXT</li>
+  <li>按需调整:自动拆分、自动分节、清理广告</li>
+  <li>右侧预览确认书名/作者/字数/章节数,可手动修改书名作者</li>
+  <li>点「⚡ 开始转换」,完成后在下方「转换记录」点下载</li>
+</ol>
+<div class="cap">图:主页(上传、格式、预览、转换)</div>
+<div class="note">💡 提示:
+  <ul>
+    <li>大文件(>5MB)自动按章节拆成多本打包 ZIP,避免 Kindle 卡顿</li>
+    <li>无章节标题的 txt 会自动插入「第N节」生成目录</li>
+    <li>「仅合并 TXT」= 多卷合并成一个 txt 下载,不转电子书</li>
+    <li>支持上传 EPUB/MOBI/AZW/AZW3 直接转格式;ZIP/RAR/7Z 压缩包自动解压</li>
+  </ul>
+</div>
+
+<h2>③ 高级设置</h2>
+<img src="03_advanced.png" alt="高级设置">
+<ul>
+  <li><b>输出目录</b>:默认程序目录下 output/,可改到其他盘</li>
+  <li><b>章节规则</b>:自定义章节正则(留空=自动识别)</li>
+  <li><b>文件保留</b>:成品文件保留时长(默认 6 小时,可设 1 小时~30 天)</li>
+  <li><b>完成提醒</b>:转换完成提示音+系统通知</li>
+  <li><b>允许手机/平板访问</b>:LAN 开关(需重启生效)</li>
+</ul>
+
+<h2>④ 网页小说导入(抓取)</h2>
+<p>点顶栏 <b>📖</b> 打开阅读器 → 「🌐 网页小说导入」区:</p>
+<img src="07_grab_url.png" alt="抓取输入">
+<ol>
+  <li>粘贴小说<b>目录页或章节页 URL</b>(任意网站都行)</li>
+  <li>书源默认「自动识别」;模式选「自动」(章节页/目录页自动判断)</li>
+  <li>勾选「清理广告」;JS 动态加载的网站可勾选「浏览器渲染」(或让它自动检测)</li>
+  <li>点「📥 抓取」→ 实时进度/日志 → 可随时取消</li>
+</ol>
+<img src="09_grab_done.png" alt="抓取完成">
+<div class="cap">图:抓取完成,提供 阅读 / 下载 TXT / 转电子书</div>
+<div class="note">💡 说明:
+  <ul>
+    <li>目录分页自动翻全(几百上千章);章节多页自动合并完整</li>
+    <li>JS 动态加载站 / 加密正文站自动用浏览器渲染(需 Chrome/Edge,或运行 install_render.bat)</li>
+    <li>「⚡ 转电子书」= 把抓取结果直接走转换流程(选格式后在主页看进度)</li>
+  </ul>
+</div>
+<div class="warn">⚠️ 抓不到的情况:需要登录的站(番茄/起点)、字体反爬、图片章节——会明确报错,不会产出脏数据。仅供自用。</div>
+
+<h2>⑤ 书源管理(可选)</h2>
+<img src="06_source_manager.png" alt="书源管理">
+<ol>
+  <li>网页导入区底部「⚙️ 书源管理」</li>
+  <li><b>🪄 自动识别</b>:粘贴本书<b>任意章节页 URL</b> → 自动检测编码/正文容器/分页 → 配置自动填好</li>
+  <li>点「保存书源」→ 立即生效(下次抓这个站自动用专用规则)</li>
+  <li>内置 4 个书源(5200/镜像/88笔趣阁/速读谷),自定义的可删除</li>
+</ol>
+<div class="note">💡 其实不配书源也能抓(通用模式自动识别容器/分页/编码),书源只是让规则更精准。搞不定的站才需要配。</div>
+
+<h2>⑥ 阅读器</h2>
+<img src="05_reader_open.png" alt="阅读器打开页">
+<ul>
+  <li><b>打开本地小说</b>:TXT / ZIP,自动净化广告、按章分页</li>
+  <li><b>网页抓取</b>:见上节(抓完可直接读)</li>
+  <li><b>最近阅读</b>:续读 / 书签 / 删除 / 清空</li>
+</ul>
+<img src="10_reader_reading.png" alt="阅读界面">
+<div class="cap">图:阅读界面(章节跳转/字号/主题/书签/纯净模式)</div>
+<ul>
+  <li>← → 键翻章;A−/A+ 调字号;🔖 加书签;⛶ 纯净全屏</li>
+  <li>进度自动记忆,重开自动续读</li>
+</ul>
+
+<h2>⑦ 主题与背景</h2>
+<img src="02_theme.png" alt="主题面板">
+<ul>
+  <li>顶栏 🐱 展开:18 套预设配色一键切换</li>
+  <li>「🌈 自定义背景」上传图片/视频,自动按图片取色生成整套配色</li>
+  <li>底部可切换 中文 / English</li>
+</ul>
+
+<h2>⑧ 转换记录</h2>
+<ul>
+  <li>主页下方「转换记录」:显示全部任务(转换+抓取),可下载/取消/清理</li>
+  <li>完成的任务文件保留 6 小时(可调),过期自动清理</li>
+  <li>「🗑 清理」:仅清记录(保留文件)或记录+文件一并删除</li>
+</ul>
+
+<h2>⑨ 安装 / 升级 / 卸载</h2>
+<ul>
+  <li><b>安装</b>:双击 start.bat(自动装 Python+Calibre);可选 install_render.bat 装渲染组件</li>
+  <li><b>升级</b>:覆盖安装——用新版 server.py + sources/ 替换旧目录文件(保留 library/output/config),再双击 start.bat</li>
+  <li><b>卸载</b>:uninstall.bat,可勾选删除数据/Playwright/Calibre/Python</li>
+</ul>
+
+<h2>⑩ 注意事项汇总</h2>
+<div class="warn">
+  <ul>
+    <li><b>仅供自用</b>:工具不内置推广、不做商业用途;抓取内容请自行确认版权合规</li>
+    <li>抓书别太频繁:站点会临时限流(504),工具已自动重试退避;整本上千章需 30 分钟~2 小时属正常</li>
+    <li>88笔趣阁的章节内容被站点截断(反盗版),每章只有前半;抓书优先用 5200 / 速读谷</li>
+    <li>番茄、起点等需登录/付费的站抓不了,这是边界(不做破解)</li>
+    <li>转换时服务内存占用与文件大小相关,超大合集(数百 MB)建议拆分后转</li>
+    <li>开启手机访问后无登录保护,别在公共 WiFi 开启;服务文件全在本机,断网也能转换</li>
+    <li>遇到问题先看「转换记录」里的错误详情;抓取问题看抓取日志</li>
+  </ul>
+</div>
+
+<p style="color:#9aa0a6;margin-top:40px;text-align:center">txt2ebook · 本地转换 · 文件不上传 · 基于 Calibre</p>
+</div>
+</body>
+</html>

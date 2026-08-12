@@ -2413,6 +2413,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_read_chapter()
         elif self.path.startswith("/backgrounds/"):
             self.handle_background()
+        elif self.path.startswith("/guide/"):
+            self.handle_guide()
         elif self.path.startswith("/progress/"):
             self.handle_progress()
         elif self.path.startswith("/download/"):
@@ -3391,6 +3393,19 @@ class Handler(BaseHTTPRequestHandler):
         t.start()
 
         self._json(200, {"ok": True, "job_id": job_id})
+
+    def handle_guide(self):
+        """Serve the guide/ folder (screenshots + tutorial page)."""
+        rel = self.path.split("?", 1)[0][len("/guide/"):] or "index.html"
+        if "/" in rel or ".." in rel or "\\" in rel:
+            self._send(404, "Not found")
+            return
+        p = BASE / "guide" / rel
+        if not p.is_file():
+            self._send(404, "Not found")
+            return
+        ctype = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+        self._send(200, p.read_bytes(), ctype)
 
     def handle_sources(self):
         """List configured web-novel sources (sources/*.json)."""
