@@ -2071,6 +2071,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # never cache pages/APIs so UI updates show up immediately
+        self.send_header("Cache-Control", "no-store")
         if extra:
             for k, v in extra.items():
                 self.send_header(k, v)
@@ -3913,7 +3915,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     padding:5px 8px; border:1px solid var(--border); border-radius:8px;
     background:var(--bg); color:var(--fg); font-size:12px; max-width:34vw;
   }
-  .ropen { flex:1; display:flex; overflow-y:auto; padding:24px; }
+  .ropen { flex:1; min-height:0; display:flex; overflow-y:auto; padding:24px; }
   .ropenbox {
     width:100%; max-width:520px; margin:0 auto;
     display:flex; flex-direction:column; min-height:100%;
