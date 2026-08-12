@@ -3891,11 +3891,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   /* ================= Reader ================= */
   .reader {
-    position:fixed; inset:0; z-index:200; display:none;
-    background:var(--bg); color:var(--fg); flex-direction:column;
+    position:fixed; top:0; right:0; bottom:0; z-index:200; display:none;
+    width:min(580px, 94vw); background:var(--bg); color:var(--fg);
+    flex-direction:column; border-left:1px solid var(--border);
+    box-shadow:-10px 0 34px rgba(0,0,0,.4);
   }
   .reader.show { display:flex; }
   body.pure .reader { background:var(--bg); }
+  .rsep { height:1px; background:var(--border); margin:16px 0; }
   .rtoolbar {
     display:flex; align-items:center; gap:8px; padding:10px 16px;
     border-bottom:1px solid var(--border); background:var(--bg2); flex-wrap:wrap;
@@ -3943,6 +3946,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   body:has(.reader.show) .themes { position:fixed; top:64px; right:20px; z-index:300; }
   body.pure .rcontent { max-width:860px; margin:0 auto; font-size:20px; padding-top:38px; }
   @media (max-width:760px) {
+    .reader { width:100vw; border-left:none; }
     .rcontent { padding:18px 14px 50px; }
     .rtitle { max-width:30vw; }
   }
@@ -4097,34 +4101,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <button class="btn" id="batchGo">⚡ <span data-i18n="batchGo"></span></button>
       </div>
 
-      <div class="webgrab" id="webGrabBox">
-        <div class="webhead">🌐 <span data-i18n="webHead"></span> <span class="note" data-i18n="webSub"></span></div>
-        <div class="webrow">
-          <input type="url" id="grabUrl" placeholder="" autocomplete="off" spellcheck="false">
-        </div>
-        <div class="webrow">
-          <input type="text" id="grabSearchKw" placeholder="" autocomplete="off" spellcheck="false">
-          <button class="btn" id="grabSearchBtn" data-tip="tipSearch">🔍 <span data-i18n="webSearch"></span></button>
-        </div>
-        <div class="grabsearch" id="grabSearchResults"></div>
-        <div class="webrow">
-          <select id="grabSource"></select>
-          <select id="grabMode">
-            <option value="auto" data-i18n="webModeAuto"></option>
-            <option value="chapter" data-i18n="webModeChapter"></option>
-            <option value="toc" data-i18n="webModeToc"></option>
-          </select>
-          <label><input type="checkbox" id="grabAds" checked> <span data-i18n="webAds"></span></label>
-        </div>
-        <div class="webrow">
-          <button class="btn" id="grabBtn" data-tip="tipGrab">📥 <span data-i18n="webGo"></span></button>
-          <button class="btn cancel" id="grabCancelBtn" style="display:none" data-tip="tipGrabCancel">✕ <span data-i18n="webCancel"></span></button>
-        </div>
-        <div class="grabstatus" id="grabStatus"></div>
-        <div class="grabprog" id="grabProg"><div class="bar"><i id="grabBar"></i></div><span id="grabPct">0%</span></div>
-        <div class="grabLog" id="grabLog"></div>
-      </div>
-
       <div class="step" data-i18n="step2"></div>
       <div class="formats">
         <label class="fmt"><input type="radio" name="format" value="mobi" checked><span><b>MOBI</b><em data-i18n="fmtMobi"></em></span></label>
@@ -4268,11 +4244,33 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <p class="rnote" data-i18n="rNote"></p>
       <button class="btn" id="rLocal" data-i18n="rLocalBtn"></button>
       <input type="file" id="rFile" accept=".txt,.zip" hidden>
-      <div class="rurlrow">
-        <input type="url" id="rUrl" placeholder="" autocomplete="off" spellcheck="false" data-tip="tipReaderUrl">
-      </div>
-      <div class="rurlrow">
-        <button class="btn" id="rUrlGo" data-i18n="rUrlGoBtn" data-tip="tipReaderUrl"></button>
+      <div class="rsep"></div>
+      <div class="webgrab">
+        <div class="webhead">🌐 <span data-i18n="webHead"></span></div>
+        <div class="webrow">
+          <input type="url" id="grabUrl" placeholder="" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="webrow">
+          <input type="text" id="grabSearchKw" placeholder="" autocomplete="off" spellcheck="false">
+          <button class="btn" id="grabSearchBtn" data-tip="tipSearch">🔍 <span data-i18n="webSearch"></span></button>
+        </div>
+        <div class="grabsearch" id="grabSearchResults"></div>
+        <div class="webrow">
+          <select id="grabSource"></select>
+          <select id="grabMode">
+            <option value="auto" data-i18n="webModeAuto"></option>
+            <option value="chapter" data-i18n="webModeChapter"></option>
+            <option value="toc" data-i18n="webModeToc"></option>
+          </select>
+          <label><input type="checkbox" id="grabAds" checked> <span data-i18n="webAds"></span></label>
+        </div>
+        <div class="webrow">
+          <button class="btn" id="grabBtn" data-tip="tipGrab">📥 <span data-i18n="webGo"></span></button>
+          <button class="btn cancel" id="grabCancelBtn" style="display:none" data-tip="tipGrabCancel">✕ <span data-i18n="webCancel"></span></button>
+        </div>
+        <div class="grabstatus" id="grabStatus"></div>
+        <div class="grabprog" id="grabProg"><div class="bar"><i id="grabBar"></i></div><span id="grabPct">0%</span></div>
+        <div class="grabLog" id="grabLog"></div>
       </div>
       <div class="rrecent">
         <div class="rrecenthead"><span data-i18n="rRecent"></span><button class="rclear" id="rClearRecent" data-i18n="rClearRecent" data-tip="tipClearRecent"></button></div>
@@ -4339,6 +4337,7 @@ const langEn = document.getElementById('langEn');
 const grabSearchKw = document.getElementById('grabSearchKw');
 const grabSearchBtn = document.getElementById('grabSearchBtn');
 const grabSearchResults = document.getElementById('grabSearchResults');
+const grabUrl = document.getElementById('grabUrl');
 const grabSource = document.getElementById('grabSource');
 const grabMode = document.getElementById('grabMode');
 const grabAds = document.getElementById('grabAds');
@@ -4349,8 +4348,6 @@ const grabProg = document.getElementById('grabProg');
 const grabBar = document.getElementById('grabBar');
 const grabPct = document.getElementById('grabPct');
 const grabLog = document.getElementById('grabLog');
-const rUrl = document.getElementById('rUrl');
-const rUrlGo = document.getElementById('rUrlGo');
 const bgmCb = document.getElementById('bgmCb');
 const bgDelFiles = document.getElementById('bgDelFiles');
 const themeBtn = document.getElementById('themeBtn');
@@ -4464,7 +4461,6 @@ function applyLang() {
   document.querySelectorAll('[data-i18n]').forEach(el => { el.innerHTML = t(el.dataset.i18n); });
   document.querySelectorAll('[data-tip]').forEach(el => { el.title = t(el.dataset.tip); });
   grabUrl.placeholder = t('webUrlPh');
-  rUrl.placeholder = t('rUrlPh');
   grabSearchKw.placeholder = t('webSearchPh');
   const sa = grabSource.options[0];
   if (sa) sa.textContent = t('webSourceAuto');
@@ -5399,7 +5395,6 @@ mergeBtn.addEventListener('click', async () => {
 
 // ================= web novel grabber =================
 let grabJobId = null;
-let grabFromReader = false;
 
 async function loadSources() {
   try {
@@ -5491,7 +5486,6 @@ function handleGrabUpdate(j) {
       if (rd) rd.onclick = (e) => { e.preventDefault(); reopenGrabBook(j.book_id); };
       const cv = grabStatus.querySelector('[data-act=conv]');
       if (cv) cv.onclick = (e) => { e.preventDefault(); convertGrabBook(j.book_id); };
-      if (grabFromReader) { grabFromReader = false; reopenGrabBook(j.book_id); }
     }
   } else if (j.status === 'error' || j.status === 'cancelled') {
     grabBtn.disabled = false;
@@ -5502,20 +5496,18 @@ function handleGrabUpdate(j) {
   }
 }
 
-async function startGrab(readerMode) {
-  const url = readerMode ? rUrl.value.trim() : grabUrl.value.trim();
+async function startGrab() {
+  const url = grabUrl.value.trim();
   if (!url) {
-    if (readerMode) rSetStatus('❌ ' + t('webNoUrl'), false);
-    else { grabStatus.className = 'grabstatus err'; grabStatus.textContent = '❌ ' + t('webNoUrl'); }
+    grabStatus.className = 'grabstatus err';
+    grabStatus.textContent = '❌ ' + t('webNoUrl');
     return;
   }
-  if (!readerMode) {
-    grabStatus.className = 'grabstatus'; grabStatus.textContent = '';
-    grabLog.classList.remove('show'); grabLog.textContent = '';
-    grabBtn.disabled = true;
-    grabCancelBtn.style.display = 'inline-block';
-  }
-  const body = { url: url, mode: readerMode ? 'auto' : grabMode.value,
+  grabStatus.className = 'grabstatus'; grabStatus.textContent = '';
+  grabLog.classList.remove('show'); grabLog.textContent = '';
+  grabBtn.disabled = true;
+  grabCancelBtn.style.display = 'inline-block';
+  const body = { url: url, mode: grabMode.value,
                  source_id: grabSource.value,
                  clean_ads: grabAds.checked ? '1' : '0' };
   setProgress(0, t('webStart'));
@@ -5527,21 +5519,16 @@ async function startGrab(readerMode) {
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || '');
     grabJobId = j.job_id;
-    grabFromReader = !!readerMode;
-    if (readerMode) rSetStatus(t('webStart'), true);
     trackJob(j.job_id);
   } catch (e) {
-    if (readerMode) rSetStatus('❌ ' + e.message, false);
-    else {
-      grabBtn.disabled = false;
-      grabCancelBtn.style.display = 'none';
-      grabStatus.className = 'grabstatus err';
-      grabStatus.textContent = '❌ ' + e.message;
-    }
+    grabBtn.disabled = false;
+    grabCancelBtn.style.display = 'none';
+    grabStatus.className = 'grabstatus err';
+    grabStatus.textContent = '❌ ' + e.message;
   }
 }
 
-grabBtn.addEventListener('click', () => startGrab(false));
+grabBtn.addEventListener('click', () => startGrab());
 
 grabSearchBtn.addEventListener('click', () => doSearch());
 grabSearchKw.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
@@ -5578,7 +5565,7 @@ async function doSearch() {
         el.title = t('webQueued');
         grabUrl.value = h.url;
         grabUrl.focus();
-        startGrab(false);
+        startGrab();
       });
     });
   } catch (e) {
@@ -5596,9 +5583,7 @@ grabCancelBtn.addEventListener('click', async () => {
     });
   } catch (e) {}
 });
-rUrlGo.addEventListener('click', () => startGrab(true));
-rUrl.addEventListener('keydown', (e) => { if (e.key === 'Enter') startGrab(true); });
-grabUrl.addEventListener('keydown', (e) => { if (e.key === 'Enter') startGrab(false); });
+grabUrl.addEventListener('keydown', (e) => { if (e.key === 'Enter') startGrab(); });
 
 // ================= multi-job progress =================
 let activeJobs = new Set();
