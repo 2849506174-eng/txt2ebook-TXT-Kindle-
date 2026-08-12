@@ -3915,8 +3915,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .rurlrow { display:flex; gap:8px; margin:12px 0; align-items:center; }
   .rurllabel { font-size:12px; color:var(--muted); white-space:nowrap; }
   .rurlrow input {
-    flex:1; min-width:0; padding:8px 10px; border-radius:9px;
-    border:1px solid var(--border); background:var(--card); color:var(--fg); font-size:13px;
+    flex:1; min-width:0; padding:11px 13px; border-radius:10px;
+    border:1px solid var(--border); background:var(--card); color:var(--fg);
+    font-size:14px; min-height:44px;
   }
   .rurlrow input:focus { outline:none; border-color:var(--accent); }
   .rrecenthead { display:flex; align-items:center; justify-content:space-between; gap:8px; }
@@ -3938,7 +3939,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <span class="festchip" id="festChip"></span>
     <span class="lanchip" id="lanChip" title=""></span>
     <span class="sp"></span>
-    <button class="langbtn" id="readerBtn" title="阅读">📖</button>
+    <button class="langbtn" id="readerBtn" title="阅读" data-tip="tipReaderBtn">📖</button>
     <div class="themewrap">
       <button class="langbtn catbtn" id="themeBtn" title="主题与自定义背景">🐱</button>
       <div class="themes" id="themesBox">
@@ -4027,8 +4028,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
           <label><input type="checkbox" id="grabAds" checked> <span data-i18n="webAds"></span></label>
         </div>
         <div class="webrow">
-          <button class="btn" id="grabBtn">📥 <span data-i18n="webGo"></span></button>
-          <button class="btn cancel" id="grabCancelBtn" style="display:none">✕ <span data-i18n="webCancel"></span></button>
+          <button class="btn" id="grabBtn" data-tip="tipGrab">📥 <span data-i18n="webGo"></span></button>
+          <button class="btn cancel" id="grabCancelBtn" style="display:none" data-tip="tipGrabCancel">✕ <span data-i18n="webCancel"></span></button>
         </div>
         <div class="grabstatus" id="grabStatus"></div>
         <div class="grabprog" id="grabProg"><div class="bar"><i id="grabBar"></i></div><span id="grabPct">0%</span></div>
@@ -4066,7 +4067,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       </label>
 
       <div class="coverrow" id="coverRow">
-        <button type="button" class="btn tiny" id="coverBtn"><span data-i18n="coverBtn"></span></button>
+        <button type="button" class="btn tiny" id="coverBtn" data-tip="tipCover"><span data-i18n="coverBtn"></span></button>
         <input type="file" id="coverFile" accept="image/*" hidden>
         <span class="coverinfo" id="coverInfo" style="display:none">
           <img id="coverPrev" alt="cover">
@@ -4117,7 +4118,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <!-- ================= Right: preview / action / results ================= -->
     <section class="col col-right">
       <div class="pv" id="previewBox">
-        <div class="pvhead">🔍 <span data-i18n="pvHead"></span><button class="pvref" id="pvRefresh" data-i18n="pvRefresh"></button></div>
+        <div class="pvhead">🔍 <span data-i18n="pvHead"></span><button class="pvref" id="pvRefresh" data-i18n="pvRefresh" data-tip="tipPvRefresh"></button></div>
         <div class="pvrow"><label data-i18n="pvTitle"></label><input id="titleInput" placeholder=""></div>
         <div class="pvrow"><label data-i18n="pvAuthor"></label><input id="authorInput" placeholder=""></div>
         <div class="pvstats" id="pvStats"></div>
@@ -4125,13 +4126,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
       </div>
 
       <div class="step" data-i18n="step3"></div>
-      <button class="btn" id="go">⚡ <span data-i18n="go"></span></button>
-      <button class="btn sec" id="mergeBtn"><span data-i18n="merge"></span><span class="note" data-i18n="mergeNote"></span></button>
+      <button class="btn" id="go" data-tip="tipGo">⚡ <span data-i18n="go"></span></button>
+      <button class="btn sec" id="mergeBtn" data-tip="tipMerge"><span data-i18n="merge"></span><span class="note" data-i18n="mergeNote"></span></button>
 
       <div class="progwrap" id="progwrap">
         <div class="bar"><i id="barfill"></i></div>
         <div class="pmeta"><span id="pmsg">...</span><span id="peta"></span><span id="ppct">0%</span></div>
-        <div class="cancelwrap"><button class="btn cancel" id="cancelBtn" data-i18n="cancel"></button></div>
+        <div class="cancelwrap"><button class="btn cancel" id="cancelBtn" data-i18n="cancel" data-tip="tipCancel"></button></div>
       </div>
 
       <div class="warn" id="warn"></div>
@@ -4180,11 +4181,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <input type="file" id="rFile" accept=".txt,.zip" hidden>
       <div class="rurlrow">
         <span class="rurllabel" data-i18n="rUrlLabel"></span>
-        <input type="url" id="rUrl" placeholder="" autocomplete="off" spellcheck="false">
-        <button class="btn" id="rUrlGo" data-i18n="rUrlGoBtn"></button>
+        <input type="url" id="rUrl" placeholder="" autocomplete="off" spellcheck="false" data-tip="tipReaderUrl">
+        <button class="btn" id="rUrlGo" data-i18n="rUrlGoBtn" data-tip="tipReaderUrl"></button>
       </div>
       <div class="rrecent">
-        <div class="rrecenthead"><span data-i18n="rRecent"></span><button class="rclear" id="rClearRecent" data-i18n="rClearRecent"></button></div>
+        <div class="rrecenthead"><span data-i18n="rRecent"></span><button class="rclear" id="rClearRecent" data-i18n="rClearRecent" data-tip="tipClearRecent"></button></div>
         <div id="rRecentList"></div>
       </div>
       <div class="rstatus" id="rStatus"></div>
@@ -4300,6 +4301,12 @@ const I18N = {
     webSourceAuto: '自动识别书源', webGo: '抓取', webCancel: '取消',
     webNoUrl: '请先输入网址', webStart: '开始抓取...', webRead: '阅读',
     webConvert: '转电子书', webDone: '抓取完成', webAds: '清理广告', rUrlLabel: '网址', rClearRecent: '清空',
+    tipGo: '按当前设置转换所选文件(可先看右侧预览)', tipMerge: '只合并 TXT,不调用 Calibre 转换',
+    tipGrab: '粘贴小说目录页或章节页网址后点击,抓取结果自动存入书库', tipGrabCancel: '取消正在进行的抓取',
+    tipCancel: '取消当前正在转换/抓取的任务', tipReaderUrl: '粘贴小说网址(目录页/章节页),抓取后自动打开阅读',
+    tipClearRecent: '清空全部阅读记录与本地书库', tipPvRefresh: '重新分析书名/字数/章节',
+    tipCover: '上传自定义封面图片(不传则自动生成文字封面)', tipReaderBtn: '打开阅读器:本地小说或网页抓取',
+    tipLan: '开启后手机/平板同一 WiFi 可访问(需重启服务生效)',
   },
   en: {
     tag: 'Local · files never leave your PC · MOBI / AZW / AZW3 / EPUB / KFX',
@@ -4332,6 +4339,12 @@ const I18N = {
     webSourceAuto: 'Auto-detect source', webGo: 'Fetch', webCancel: 'Cancel',
     webNoUrl: 'Enter a URL first', webStart: 'Fetching...', webRead: 'Read',
     webConvert: 'Convert', webDone: 'Fetched', webAds: 'Clean ads', rUrlLabel: 'URL', rClearRecent: 'Clear',
+    tipGo: 'Convert selected files with current settings (see preview first)', tipMerge: 'Merge TXT only, no Calibre conversion',
+    tipGrab: 'Paste a novel TOC/chapter URL, result is saved to the library', tipGrabCancel: 'Cancel the running grab',
+    tipCancel: 'Cancel the running conversion/grab job', tipReaderUrl: 'Paste a novel URL (TOC/chapter), auto-opens in the reader after fetching',
+    tipClearRecent: 'Clear all reading history and the local library', tipPvRefresh: 'Re-analyze title/chars/chapters',
+    tipCover: 'Upload a custom cover (auto-generated if omitted)', tipReaderBtn: 'Reader: local novels or web fetching',
+    tipLan: 'Allow phone/tablet access on the same WiFi (restart required)',
   },
 };
 let lang = 'zh';
@@ -4349,6 +4362,7 @@ function applyLang() {
   langZh.classList.toggle('on', lang === 'zh');
   langEn.classList.toggle('on', lang === 'en');
   document.querySelectorAll('[data-i18n]').forEach(el => { el.innerHTML = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-tip]').forEach(el => { el.title = t(el.dataset.tip); });
   grabUrl.placeholder = t('webUrlPh');
   rUrl.placeholder = t('rUrlPh');
   const sa = grabSource.options[0];
