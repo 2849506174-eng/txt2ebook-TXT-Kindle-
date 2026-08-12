@@ -3982,6 +3982,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
   .grabsearch .gsitem .gsm { color:var(--muted); font-size:11px; white-space:nowrap; }
   .grabsearch .gsitem .gsgo { color:var(--accent); white-space:nowrap; }
+  .grabsearch .gsitem.picked { opacity:.55; cursor:default; }
+  .grabsearch .gsitem.picked:hover { border-color:var(--border); }
+  .grabsearch .gsitem.picked .gsgo { color:var(--muted); }
   .grabprog { display:none; margin-top:10px; align-items:center; gap:8px; }
   .grabprog.show { display:flex; }
   .grabprog .bar { flex:1; height:8px; border-radius:999px; background:var(--card); overflow:hidden; }
@@ -4392,6 +4395,7 @@ const I18N = {
     webConvert: '转电子书', webDone: '抓取完成', webAds: '清理广告', rUrlLabel: '网址', rClearRecent: '清空',
     webSearch: '搜书', webSearchPh: '输入书名,在各书源站搜索(可搜到即点即抓)', webSearching: '搜索中...',
     webSearchEmpty: '没有找到结果', webSearchFail: '搜索失败', webPick: '点击抓取该书',
+    webQueued: '已提交,等待/抓取中(可继续点其他结果,自动排队)',
     tipSearch: '输入书名,在支持站内搜索的书源站查找同名书',
     tipGo: '按当前设置转换所选文件(可先看右侧预览)', tipMerge: '只合并 TXT,不调用 Calibre 转换',
     tipGrab: '粘贴小说目录页或章节页网址后点击,抓取结果自动存入书库', tipGrabCancel: '取消正在进行的抓取',
@@ -4433,6 +4437,7 @@ const I18N = {
     webConvert: 'Convert', webDone: 'Fetched', webAds: 'Clean ads', rUrlLabel: 'URL', rClearRecent: 'Clear',
     webSearch: 'Search', webSearchPh: 'Search a title across sources, click a hit to fetch', webSearching: 'Searching...',
     webSearchEmpty: 'no results', webSearchFail: 'search failed', webPick: 'click to fetch',
+    webQueued: 'submitted - queued/fetching (click more results, they queue up)',
     tipSearch: 'Search a title on sources that support site search',
     tipGo: 'Convert selected files with current settings (see preview first)', tipMerge: 'Merge TXT only, no Calibre conversion',
     tipGrab: 'Paste a novel TOC/chapter URL, result is saved to the library', tipGrabCancel: 'Cancel the running grab',
@@ -5563,8 +5568,14 @@ async function doSearch() {
         }).join('');
     grabSearchResults.querySelectorAll('.gsitem').forEach(el => {
       el.addEventListener('click', () => {
+        if (el.classList.contains('picked')) return;
         const h = hits[+el.dataset.i];
         if (!h) return;
+        // mark as submitted so double-clicks never spawn duplicate jobs
+        el.classList.add('picked');
+        const go = el.querySelector('.gsgo');
+        if (go) go.textContent = '⏳';
+        el.title = t('webQueued');
         grabUrl.value = h.url;
         grabUrl.focus();
         startGrab(false);
