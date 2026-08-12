@@ -8,12 +8,16 @@ Features:
 - Converts each part with Calibre; packages multiple parts into a ZIP.
 - No external Python dependencies (stdlib only). Conversion via Calibre.
 """
-import json
+import gzip
 import hashlib
+import html as html_mod
+import json
 import mimetypes
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -21,9 +25,10 @@ import time
 import urllib.request
 import uuid
 import zipfile
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urljoin, urlparse
 
 BASE = Path(__file__).resolve().parent
 OUTPUT = BASE / "output"
@@ -310,7 +315,7 @@ HISTORY_TTL = 7 * 24 * 3600
 SECTION_CHARS = 10000
 
 HOST = "127.0.0.1"
-PORT = 8765
+PORT = int(os.environ.get("TXT2EBOOK_PORT") or 8765)
 
 # When CONFIG["host"] == "0.0.0.0", the server listens on all network
 # interfaces so phones/tablets on the same LAN can open the page too.
@@ -681,6 +686,8 @@ _AD_LINE_RE = re.compile(
     r"|随手收藏[，,]方便下次阅读"
     r"|如果您觉得\S*请(?:收藏|推荐给朋友)\S*"
     r"|更多精彩小说请访问\S*"
+    r"|.*看后求收藏.*"
+    r"|.*(?:最新|新)网址[：:]\S*"
     r")\s*$",
     re.IGNORECASE,
 )
@@ -694,6 +701,7 @@ _AD_INLINE_RE = re.compile(
     r"|更多精彩小说请访问\S*[。！!]?"
     r"|最快更新[。！!]?"
     r"|无弹窗[，,]无广告[。！!]?"
+    r"|看后求收藏[（(][^）)]*[）)]"
 )
 
 
@@ -747,6 +755,818 @@ def _insert_sections(text, target_chars=SECTION_CHARS):
             out.append(f"\n第{sec}节\n")
             acc = 0
     return "".join(out)
+
+
+# ================= web novel grabber =================
+# Personal-use web novel fetching: URL -> clean TXT in the local library.
+# Extraction prefers trafilatura when installed (optional dependency); the
+# stdlib fallback (urllib + HTMLParser) is the default path. Book sources are
+# data-driven JSON files under sources/ - adapting a new site means adding a
+# JSON file, not changing code.
+
+GRAB_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+           "Chrome/126.0 Safari/537.36")
+GRAB_TIMEOUT = 25
+GRAB_MAX_PAGE_BYTES = 4 * 1024 * 1024
+GRAB_MAX_CHAPTERS = 3000
+GRAB_SEM = threading.BoundedSemaphore(2)
+SOURCES_DIR = BASE / "sources"
+
+# Chapter-heading pattern used to find chapter links on a TOC page.
+_GRAB_CH_RE = re.compile(
+    r"(?:第\s*[0-9零一二三四五六七八九十百千两万]+\s*[章节回卷]"
+    r"|Chapter\s+[0-9]+"
+    r"|(?:" + _SPECIAL_HEADINGS + r"))",
+    re.IGNORECASE,
+)
+# Site-branding fragments stripped from <title> tags when guessing a book name.
+_SITE_NOISE = ("笔趣阁", "无弹窗", "最新章节", "免费阅读", "全文阅读", "在线阅读",
+               "txt下载", "小说阅读网", "5200", "88笔趣阁", "新笔趣阁",
+               "笔尖中文", "书友最值得收藏", "最新章节目录", "全文", "小说",
+               "章节目录", "无弹窗阅读")
+
+
+class GrabError(Exception):
+    pass
+
+
+def _load_sources():
+    """Load book-source JSON files from sources/*.json into a dict by id."""
+    srcs = {}
+    if SOURCES_DIR.is_dir():
+        for p in sorted(SOURCES_DIR.glob("*.json")):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, dict) or not data.get("id"):
+                continue
+            data["_file"] = p.name
+            srcs[data["id"]] = data
+    return srcs
+
+
+SOURCES = _load_sources()
+
+
+def _sniff_charset(raw):
+    """Best-effort charset from BOM / <meta charset> in the first bytes."""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    head = raw[:4096].decode("latin-1", "replace")
+    m = re.search(r'<meta[^>]+charset=["\']?([\w-]+)', head, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(
+        r'<meta[^>]+http-equiv=["\']?content-type["\']?[^>]+'
+        r'content=["\']?[^;]*;\s*charset=([\w-]+)', head, re.I)
+    if m:
+        return m.group(1)
+    return None
+
+
+def decode_web_bytes(raw, forced=None):
+    """Decode fetched bytes to text. A source-declared encoding wins;
+    otherwise BOM/meta sniff, then the same _encoding_score pick used for
+    local files (utf-8 -> gb18030/big5)."""
+    if forced:
+        enc = "gb18030" if forced.lower() in ("gbk", "gb2312") else forced
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            return raw.decode(enc, "replace")
+    enc = _sniff_charset(raw)
+    for cand in (enc, "utf-8-sig", "utf-8"):
+        if not cand:
+            continue
+        try:
+            return raw.decode(cand)
+        except UnicodeDecodeError:
+            continue
+    best, best_enc, best_score = None, None, None
+    for cand in ("gb18030", "big5"):
+        try:
+            dec = raw.decode(cand)
+        except UnicodeDecodeError:
+            continue
+        sc = _encoding_score(dec)
+        if best is None or sc > best_score:
+            best, best_enc, best_score = dec, cand, sc
+    if best is not None:
+        return best
+    return raw.decode("utf-8", "replace")
+
+
+def _http_fetch(url, job_id=None, timeout=GRAB_TIMEOUT, referer=None):
+    """Download a page. Returns (raw_bytes, final_url). Retries once without
+    TLS verification when the site has a broken certificate (common on
+    ad-ridden novel mirrors), and retries transient 5xx responses."""
+    def _open(ctx):
+        req = urllib.request.Request(url, headers={
+            "User-Agent": GRAB_UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
+        })
+        if referer:
+            req.add_header("Referer", referer)
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+
+    for attempt in range(4):
+        try:
+            resp = _open(None)
+        except ssl.SSLError:
+            resp = _open(ssl._create_unverified_context())
+        except urllib.error.HTTPError as e:
+            if e.code >= 500 and attempt < 3:
+                time.sleep(2.0 + attempt * 2.0)
+                continue
+            raise GrabError(f"HTTP {e.code}: {url}")
+        except (urllib.error.URLError, socket.timeout, OSError) as e:
+            if attempt < 3:
+                time.sleep(2.0 + attempt * 2.0)
+                continue
+            raise GrabError(f"无法访问页面: {e}")
+        try:
+            with resp:
+                raw = resp.read(GRAB_MAX_PAGE_BYTES + 1)
+                if len(raw) > GRAB_MAX_PAGE_BYTES:
+                    raise GrabError("页面过大,已中止")
+                cenc = resp.headers.get("Content-Encoding", "")
+                final = resp.geturl()
+        except GrabError:
+            raise
+        except Exception as e:
+            raise GrabError(f"读取页面失败: {e}")
+        break
+    else:
+        raise GrabError(f"HTTP 多次失败: {url}")
+    if cenc == "gzip":
+        raw = gzip.decompress(raw)
+    elif cenc == "deflate":
+        import zlib
+        try:
+            raw = zlib.decompress(raw)
+        except zlib.error:
+            raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+    return raw, final
+
+
+# Tags that start a new line when converting HTML to text. ``div`` is NOT one
+# of them: divs are usually wrappers, and breaking on every div would split
+# article text around ad/script divs embedded mid-chapter.
+_BLOCK_TAGS = {"p", "br", "li", "tr", "blockquote", "pre", "dd", "dt",
+               "h1", "h2", "h3", "h4", "h5", "h6", "section", "article",
+               "table", "ul", "ol", "hr", "form", "fieldset", "figure",
+               "header", "footer", "nav", "aside"}
+_SKIP_TAGS = {"script", "style", "noscript", "head", "iframe", "object",
+              "embed", "svg", "canvas", "template", "select", "button"}
+
+
+def _norm_line(s):
+    return re.sub(r"[ \t\u3000]+", " ", s).strip()
+
+
+class _TextCollector(HTMLParser):
+    """Collect visible text from HTML; block elements become line breaks and
+    script/style content is dropped. Returns a list of text lines."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.lines = []
+        self.cur = []
+        self.skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in _SKIP_TAGS:
+            self.skip += 1
+            return
+        if self.skip:
+            return
+        if tag in _BLOCK_TAGS or tag == "br":
+            self._flush()
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in _SKIP_TAGS:
+            if self.skip:
+                self.skip -= 1
+            return
+        if self.skip:
+            return
+        if tag in _BLOCK_TAGS or tag == "br":
+            self._flush()
+
+    def handle_data(self, data):
+        if self.skip:
+            return
+        if data:
+            self.cur.append(data)
+
+    def _flush(self):
+        s = _norm_line("".join(self.cur))
+        if s:
+            self.lines.append(s)
+        self.cur = []
+
+    def finish(self):
+        self._flush()
+        return self.lines
+
+
+class _SelectorExtractor(HTMLParser):
+    """Capture the text of the first element matching one of the given
+    selectors. Selector = {"tag": "div", "id": "content"} - tag required,
+    attributes optional (id exact, class token match)."""
+    def __init__(self, selectors):
+        super().__init__(convert_charrefs=True)
+        self.selectors = selectors
+        self.depth = 0
+        self.match_tag = None
+        self.lines = []
+        self.cur = []
+        self.in_skip = 0
+        self._done = False
+
+    def _matches(self, tag, attrs):
+        attrs = dict(attrs)
+        for sel in self.selectors:
+            if sel.get("tag", "").lower() != tag:
+                continue
+            ok = True
+            for k, v in sel.items():
+                if k == "tag":
+                    continue
+                av = attrs.get(k)
+                if k == "class":
+                    if not av or v not in av.split():
+                        ok = False
+                        break
+                elif av != v:
+                    ok = False
+                    break
+            if ok:
+                return True
+        return False
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if self._done:
+            return
+        if tag in _SKIP_TAGS:
+            self.in_skip += 1
+            return
+        if self.depth:
+            self.depth += 1
+            if tag in _BLOCK_TAGS:
+                self._flush()
+            return
+        if self._matches(tag, attrs):
+            self.match_tag = tag
+            self.depth = 1
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if self._done:
+            return
+        if tag in _SKIP_TAGS:
+            if self.in_skip:
+                self.in_skip -= 1
+            return
+        if not self.depth:
+            return
+        if tag == self.match_tag:
+            self.depth -= 1
+            if self.depth == 0:
+                self._flush()
+                self._done = True
+        elif tag in _BLOCK_TAGS:
+            self._flush()
+
+    def handle_data(self, data):
+        if self._done or self.in_skip or not self.depth:
+            return
+        if data:
+            self.cur.append(data)
+
+    def _flush(self):
+        s = _norm_line("".join(self.cur))
+        if s:
+            self.lines.append(s)
+        self.cur = []
+
+    def result(self):
+        return "\n".join(self.lines) if self.lines else None
+
+
+def _extract_generic(html_text):
+    """Trafilatura first (optional dependency), else a stdlib heuristic: find
+    the longest run of consecutive text lines with decent CJK density, falling
+    back to the largest text block overall."""
+    try:
+        import trafilatura
+        out = trafilatura.extract(html_text, include_comments=False,
+                                  include_tables=False)
+        if out and out.strip():
+            return out.strip()
+    except Exception:
+        pass
+    collector = _TextCollector()
+    try:
+        collector.feed(html_text)
+        collector.close()
+    except Exception:
+        pass
+    lines = collector.finish()
+    if not lines:
+        return ""
+    best = []
+    cur = []
+    for ln in lines:
+        cjk = sum(1 for c in ln if "\u4e00" <= c <= "\u9fff")
+        good = cjk >= 10 or (cjk / max(1, len(ln)) > 0.25 and cjk >= 3)
+        if good:
+            cur.append(ln)
+            if len(cur) > len(best):
+                best = list(cur)
+        else:
+            cur = []
+    if len(best) >= 3:
+        return "\n".join(best)
+    return max(lines, key=len)
+
+
+def _clean_page_title(raw):
+    """Guess a book/chapter name from a <title> tag: drop parts that are pure
+    site branding and strip common site suffixes."""
+    if not raw:
+        return ""
+    s = raw.strip()
+    parts = [p.strip() for p in re.split(r"[-_|·—]", s) if p.strip()]
+    if len(parts) > 1:
+        kept = [p for p in parts
+                if not (len(p) <= 8 and any(n in p for n in _SITE_NOISE))]
+        # a part that looks like a chapter heading is not the book name
+        kept = [p for p in kept if not _GRAB_CH_RE.search(p)] or kept
+        if kept:
+            s = max(kept, key=len)
+    s = re.sub(r"(?:无弹窗|最新章节(?:列表)?|全文免费阅读|免费阅读|全文阅读|在线阅读|最新章节目录|"
+               r"小说阅读网|txt下载|笔趣阁|5200|88笔趣阁|新笔趣阁|笔尖中文).*$", "", s)
+    return s.strip(" _-|·（）()")
+
+
+def _page_author(html_text):
+    """Best-effort author from a TOC page (作 者:xxx / 作者:xxx). The colon is
+    required so search-box placeholders like 书名、作者、角色 never match."""
+    m = re.search(r"作\s*者\s*[:：]\s*(?:<[^>]+>)*\s*([^<>\s]{2,20})",
+                  html_text)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _extract_chapter_links(html_text, base_url, link_re=None):
+    """All anchors whose text looks like a chapter heading, in document
+    order. Returns [(title, abs_url)] limited to the same site."""
+    link_re = link_re or _GRAB_CH_RE
+    links = []
+    for m in re.finditer(
+            r'<a[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+            html_text, re.S | re.I):
+        href = m.group(1).strip()
+        text = _norm_line(re.sub(r"<[^>]+>", " ", m.group(2)))
+        text = html_mod.unescape(text).strip()
+        if not text or not link_re.search(text):
+            continue
+        low = href.lower()
+        if low.startswith(("javascript:", "#", "mailto:")):
+            continue
+        abs_url = urljoin(base_url, href)
+        if not abs_url.startswith(("http://", "https://")):
+            continue
+        bnet = urlparse(base_url).netloc
+        anet = urlparse(abs_url).netloc
+        if bnet and anet and anet != bnet \
+                and not anet.endswith("." + bnet) and not bnet.endswith("." + anet):
+            continue
+        links.append((text, abs_url))
+    return links
+
+
+def _order_chapters(links):
+    """Dedupe (keep last occurrence - sites list newest chapters first in a
+    'recent' block before the full list) and put chapters in reading order."""
+    seen = {}
+    for text, url in links:
+        # pop + re-insert so the LAST occurrence also wins the position
+        seen.pop(url, None)
+        seen[url] = (text, url)
+    ordered = list(seen.values())
+    if len(ordered) > 1:
+        nums = []
+        for text, _u in ordered[:120]:
+            m = re.search(r"第\s*([0-9]+)\s*[章节回卷]", text)
+            nums.append(int(m.group(1)) if m else None)
+        desc = sum(1 for i in range(1, len(nums))
+                   if nums[i] is not None and nums[i - 1] is not None
+                   and nums[i] < nums[i - 1])
+        asc = sum(1 for i in range(1, len(nums))
+                  if nums[i] is not None and nums[i - 1] is not None
+                  and nums[i] > nums[i - 1])
+        if desc > asc:
+            ordered.reverse()
+    return ordered
+
+
+def _toc_pages(base_url, html_text, pages_cfg, visited):
+    """Follow TOC pagination links (e.g. 下一页 / 更多章节列表). Returns a
+    list of additional page URLs (unvisited)."""
+    out = []
+    if not pages_cfg:
+        return out
+    try:
+        rx = re.compile(pages_cfg.get("next_text_re") or "下一页|下页|更多章节")
+    except re.error:
+        return out
+    for m in re.finditer(
+            r'<a[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+            html_text, re.S | re.I):
+        href = m.group(1).strip()
+        tx = _norm_line(re.sub(r"<[^>]+>", " ", m.group(2)))
+        if not rx.search(tx):
+            continue
+        low = href.lower()
+        if low.startswith(("javascript:", "#", "mailto:")):
+            continue
+        u = urljoin(base_url, href)
+        if u.startswith(("http://", "https://")) and u not in visited:
+            out.append(u)
+    return out
+
+
+def _chapter_pages(base_url, html_text):
+    """Additional page URLs for a multi-page chapter (x.html -> x_2.html,
+    x_3.html ...), plus any link explicitly labelled 下一页/下页."""
+    pages = []
+    path = urlparse(base_url).path
+    stem = path.rsplit("/", 1)[-1]
+    stem_noext, ext = os.path.splitext(stem)
+    if not stem_noext:
+        return pages
+    for m in re.finditer(
+            r'<a[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>([^<]{1,20})</a>',
+            html_text, re.I):
+        href = m.group(1).strip()
+        tx = _norm_line(m.group(2))
+        name = href.rsplit("/", 1)[-1]
+        mm = re.match(r"^" + re.escape(stem_noext) + r"_(\d+)\."
+                      + re.escape(ext.lstrip(".")) + r"$", name)
+        if mm:
+            pages.append((int(mm.group(1)), urljoin(base_url, href)))
+        elif tx in ("下一页", "下页", "第2页") \
+                and not href.lower().startswith(("javascript:", "#")):
+            pages.append((999, urljoin(base_url, href)))
+    pages.sort(key=lambda x: x[0])
+    out = []
+    for _n, u in pages:
+        if u not in out:
+            out.append(u)
+    return out[:20]
+
+
+def _looks_obfuscated(text):
+    """Font-anti-scrape sites replace CJK with private-use glyphs; image
+    chapters have almost no text at all."""
+    if not text or not text.strip():
+        return True
+    cjk = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+    pua = sum(1 for c in text if 0xE000 <= ord(c) <= 0xF8FF)
+    n = len(text)
+    if pua / max(1, n) > 0.01:
+        return True
+    if n > 200 and cjk / n < 0.05:
+        return True
+    if n > 50 and cjk < 10:
+        return True
+    return False
+
+
+def _safe_stem(name):
+    stem = re.sub(r"[\\/:*?\"<>|\r\n\t]", " ", name or "")
+    stem = re.sub(r"\s+", " ", stem).strip(" .")
+    return stem[:80] or "book"
+
+
+def _match_source(url):
+    for s in SOURCES.values():
+        rx = s.get("url_re")
+        if rx:
+            try:
+                if re.search(rx, url, re.I):
+                    return s
+            except re.error:
+                continue
+    return None
+
+
+def _link_prefixes(links):
+    """Distinct URL path prefixes (first two segments) among chapter links.
+    A real book TOC keeps one prefix; a site homepage mixes many books."""
+    pref = set()
+    for _tx, u in links:
+        parts = urlparse(u).path.strip("/").split("/")
+        pref.add("/".join(parts[:2]))
+    return pref
+
+
+def _extract_chapter(html_text, source, base_url):
+    """Extract (chapter_title, content_text) from a chapter page."""
+    title = None
+    content = None
+    if source:
+        sel_title = (source.get("chapter") or {}).get("title") or []
+        sel_body = (source.get("chapter") or {}).get("content") or []
+        if sel_body:
+            ex = _SelectorExtractor(sel_body)
+            try:
+                ex.feed(html_text)
+                ex.close()
+            except Exception:
+                pass
+            content = ex.result()
+        if sel_title:
+            ex2 = _SelectorExtractor(sel_title)
+            try:
+                ex2.feed(html_text)
+                ex2.close()
+            except Exception:
+                pass
+            title = ex2.result()
+    if content is None:
+        content = _extract_generic(html_text)
+    if not title:
+        m = re.search(r"<h1[^>]*>(.*?)</h1>", html_text, re.S | re.I)
+        if m:
+            title = _norm_line(re.sub(r"<[^>]+>", " ", m.group(1)))
+    if not title:
+        m = re.search(r"<title>([^<]*)</title>", html_text, re.S | re.I)
+        if m:
+            title = _clean_page_title(m.group(1))
+    if title:
+        # strip page-number suffixes like (第1/2页)
+        title = re.sub(r"[（(]\s*第?\s*\d+\s*/\s*\d+\s*页?\s*[)）]\s*$",
+                       "", title).strip()
+    return title, content
+
+
+def _write_library_book(title, author, text, source_url):
+    """Store a cleaned book into library/ and open a reading session.
+    Returns (book_id, sid_or_None)."""
+    book_id = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+    lib = READ_LIB / book_id
+    lib.mkdir(parents=True, exist_ok=True)
+    (lib / "content.txt").write_text(text, encoding="utf-8")
+    try:
+        (lib / "meta.json").write_text(json.dumps(
+            {"title": title or "未命名", "author": author or "",
+             "opened": time.time(), "source_url": source_url,
+             "grabbed": True}, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    sid = None
+    try:
+        sid, _resume = _open_read_session(title or "未命名", None, book_id)
+    except Exception:
+        pass
+    _prune_read_lib()
+    return book_id, sid
+
+
+def _grab_single_chapter(job_id, url, html_text, final_url, source, enc,
+                         clean_ads, _log):
+    """A single chapter page -> one book. Returns dict or raises GrabError."""
+    title, content = _extract_chapter(html_text, source, final_url)
+    if content is None or len(content.strip()) < 50 \
+            or _looks_obfuscated(content):
+        raise GrabError("未能提取到正文(页面可能需要登录、是动态页面或使用字体反爬/图片章节)")
+    if clean_ads:
+        content, _removed = _clean_ad_lines(content)
+    pages = _chapter_pages(final_url, html_text)
+    if pages:
+        _log(f"章节有 {len(pages) + 1} 页,正在抓取剩余页面...")
+        for i, pu in enumerate(pages, 1):
+            if _is_cancelled(job_id):
+                raise GrabError("cancelled")
+            try:
+                raw2, _ = _http_fetch(pu, job_id)
+                html2 = decode_web_bytes(raw2, enc)
+                _t, part = _extract_chapter(html2, source, pu)
+                if part and not _looks_obfuscated(part):
+                    if clean_ads:
+                        part, _r2 = _clean_ad_lines(part)
+                    content = content.rstrip() + "\n\n" + part.strip()
+                set_job(job_id, progress=30 + int(i / (len(pages) + 1) * 30))
+            except GrabError:
+                continue
+    m = re.search(r"<title>([^<]*)</title>", html_text, re.S | re.I)
+    page_title = _clean_page_title(m.group(1)) if m else ""
+    book_title = page_title or title or "未命名章节"
+    # prepend the chapter heading so chapter detection / TOC works
+    heading = (title or "").strip()
+    if heading and not _GRAB_CH_RE.search(content.split("\n", 1)[0]):
+        content = heading + "\n" + content
+    return {"title": book_title, "text": content, "chapters": 1,
+            "chapter_titles": [title or book_title]}
+
+
+def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
+                     clean_ads, max_chapters, _log):
+    """A TOC page -> every chapter fetched and merged. Returns dict."""
+    toc_cfg = (source or {}).get("toc") or {}
+    link_re = None
+    try:
+        link_re = re.compile(toc_cfg.get("link_re") or str(_GRAB_CH_RE.pattern))
+    except re.error:
+        link_re = _GRAB_CH_RE
+    chapters = _extract_chapter_links(html_text, final_url, link_re)
+    # follow TOC pagination (sites that split the chapter list across pages)
+    visited = {final_url}
+    pages_cfg = toc_cfg.get("pages") or {}
+    max_pages = int(pages_cfg.get("max_pages") or 0) or 20
+    queue = _toc_pages(final_url, html_text, pages_cfg, visited)
+    hops = 0
+    while queue and hops < max_pages:
+        pu = queue.pop(0)
+        if pu in visited:
+            continue
+        visited.add(pu)
+        try:
+            raw_p, _ = _http_fetch(pu, job_id, referer=final_url)
+            html_p = decode_web_bytes(raw_p, enc)
+        except GrabError:
+            continue
+        chapters += _extract_chapter_links(html_p, pu, link_re)
+        hops += 1
+        set_job(job_id, progress=8, message=f"正在读取目录分页 {hops}/{max_pages}...")
+        queue += _toc_pages(pu, html_p, pages_cfg, visited)
+    chapters = _order_chapters(chapters)
+    _log(f"目录共 {len(chapters)} 章")
+    if max_chapters and len(chapters) > max_chapters:
+        _log(f"章节过多,仅抓取前 {max_chapters} 章")
+        chapters = chapters[:max_chapters]
+    if not chapters:
+        raise GrabError("目录页未找到章节链接(页面可能需要登录或为动态页面)")
+
+    m = re.search(r"<title>([^<]*)</title>", html_text, re.S | re.I)
+    book_title = _clean_page_title(m.group(1)) if m else ""
+    author = _page_author(html_text)
+
+    parts = []
+    skipped = []
+    ads_total = 0
+    total = len(chapters)
+    set_job(job_id, total_parts=total, done_parts=0, progress=10,
+            message=f"目录 {total} 章,开始逐章抓取...")
+    for i, (ch_title, ch_url) in enumerate(chapters, 1):
+        if _is_cancelled(job_id):
+            raise GrabError("cancelled")
+        body = None
+        heading = None
+        try:
+            raw_c, _ = _http_fetch(ch_url, job_id, referer=final_url)
+            html_c = decode_web_bytes(raw_c, enc)
+            heading, body = _extract_chapter(html_c, source, ch_url)
+            if body is None or len(body.strip()) < 50:
+                skipped.append((ch_title, "空内容/图片章节"))
+                body = None
+            elif _looks_obfuscated(body):
+                skipped.append((ch_title, "疑似字体反爬"))
+                body = None
+        except GrabError as e:
+            skipped.append((ch_title, str(e)))
+            body = None
+        if body is not None:
+            if clean_ads:
+                body, r = _clean_ad_lines(body)
+                ads_total += r
+            h = (heading or ch_title).strip()
+            h = re.sub(r"[（(]\s*第?\s*\d+\s*/\s*\d+\s*页?\s*[)）]\s*$",
+                       "", h).strip()
+            parts.append(h + "\n" + body.strip())
+        pct = 10 + int(i / total * 80)
+        set_job(job_id, done_parts=i, progress=pct,
+                message=f"正在抓取 {i}/{total} 章: {ch_title[:22]}")
+        if i % 25 == 0:
+            _log(f"已抓取 {i}/{total} 章 · 跳过 {len(skipped)}")
+        time.sleep(0.15)
+    if not parts:
+        raise GrabError("所有章节都未能提取(该站可能使用字体反爬/图片章节或需要登录)")
+    if len(skipped) > len(parts) * 2:
+        _log(f"⚠️ 大量章节失败({len(skipped)}/{total}),该站可能使用字体反爬或图片章节")
+    text = "\n\n".join(parts)
+    if _count_chapters(text) < 2:
+        text = _insert_sections(text)
+    return {"title": book_title, "author": author, "text": text,
+            "chapters": len(parts), "skipped": skipped,
+            "ads_removed": ads_total, "chapter_titles": [p.split("\n", 1)[0] for p in parts]}
+
+
+def _run_grab_body(job_id, url, source, mode, clean_ads, title_override,
+                   author_override, max_chapters, _log):
+    raw, final_url = _http_fetch(url, job_id)
+    if source is None:
+        source = _match_source(final_url) or _match_source(url)
+    enc = (source or {}).get("encoding") or None
+    html_text = decode_web_bytes(raw, enc)
+    set_job(job_id, progress=5, message="已下载页面,正在解析...")
+    _log(f"已下载 {len(raw) // 1024} KB · 编码 "
+         f"{enc or _sniff_charset(raw) or '自动'} · 书源 {source.get('name') if source else '通用提取'}")
+
+    links = _extract_chapter_links(html_text, final_url)
+    page_mode = mode
+    if page_mode == "auto":
+        # many chapter links under one URL prefix = a book TOC; links spread
+        # over many prefixes = a homepage/recent list, treat as chapter page
+        if len(links) >= 5 and len(_link_prefixes(links)) <= 3:
+            page_mode = "toc"
+        else:
+            page_mode = "chapter"
+    _log(f"页面类型: {'目录页' if page_mode == 'toc' else '章节页'} · "
+         f"识别到章节链接 {len(links)} 个")
+
+    if page_mode == "chapter":
+        res = _grab_single_chapter(job_id, url, html_text, final_url,
+                                   source, enc, clean_ads, _log)
+    else:
+        res = _grab_whole_book(job_id, url, html_text, final_url,
+                               source, enc, clean_ads, max_chapters, _log)
+
+    title = (title_override or res.get("title") or "未命名").strip()
+    author = (author_override or res.get("author") or "").strip()
+    text = res["text"]
+    if len(text.encode("utf-8")) > READ_MAX_TEXT:
+        raise GrabError("抓取内容过大(净化后超过 30MB),请用「转电子书」拆分后再阅读")
+    book_id, sid = _write_library_book(title, author, text, url)
+
+    # also offer the raw TXT for download / normal conversion flow
+    job_dir = output_base() / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        (job_dir / ".txt2ebook_job").write_text("1")
+    except OSError:
+        pass
+    stem = _safe_stem(title)
+    txt_path = job_dir / (stem + ".txt")
+    txt_path.write_text(text, encoding="utf-8")
+
+    skipped = res.get("skipped") or []
+    ads_n = res.get("ads_removed") or 0
+    msg = (f"《{title}》抓取完成 · {res.get('chapters', 1)} 章 · "
+           f"{len(text):,} 字")
+    if skipped:
+        msg += f" · 跳过 {len(skipped)} 章"
+    if ads_n:
+        msg += f" · 清理广告 {ads_n} 行"
+    _log(msg)
+    set_job(job_id, book_id=book_id, title=title, author=author, sid=sid,
+            message=msg)
+    _finish_job(job_id, status="done", progress=100, book_id=book_id,
+                sid=sid, title=title, author=author,
+                chapters=res.get("chapters", 1),
+                chars=len(text), skipped=len(skipped),
+                download=f"/download/{job_id}/{quote(txt_path.name)}",
+                filename=txt_path.name, size=txt_path.stat().st_size,
+                is_zip=False, message=msg)
+
+
+def run_grab(job_id, url, source=None, mode="auto", clean_ads=True,
+             title_override=None, author_override=None, max_chapters=None):
+    """Worker thread for /grab: fetch a chapter page or a whole book and
+    store a clean TXT into the library + job dir. kind='grab'."""
+    log = []
+
+    def _log(msg):
+        log.append(str(msg))
+        set_job(job_id, log=log[-150:])
+
+    if not GRAB_SEM.acquire(blocking=False):
+        set_job(job_id, status="running", message="排队中(等待空闲抓取名额)...")
+        while not GRAB_SEM.acquire(timeout=1):
+            if _is_cancelled(job_id):
+                _finish_job(job_id, status="cancelled", message="已取消")
+                return
+    try:
+        try:
+            _run_grab_body(job_id, url, source, mode, clean_ads,
+                           title_override, author_override, max_chapters, _log)
+        except GrabError as e:
+            if str(e) == "cancelled":
+                _finish_job(job_id, status="cancelled", message="已取消")
+            else:
+                _finish_job(job_id, status="error", message=str(e))
+        except Exception as e:
+            _finish_job(job_id, status="error", message=f"抓取失败: {e}")
+    finally:
+        GRAB_SEM.release()
 
 
 def _run_proc_cancellable(job_id, cmd, timeout_s):
@@ -859,6 +1679,7 @@ def _finish_job(job_id, **kw):
                 "cover": job.get("cover"),
                 "split_mb": job.get("split_mb"),
                 "auto_chapters": job.get("auto_chapters"),
+                "book_id": job.get("book_id"),
                 "ttl": job.get("ttl", JOB_TTL),
             }
             _save_history_locked()
@@ -1199,6 +2020,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_get_config()
         elif self.path == "/bg/list":
             self.handle_bg_list()
+        elif self.path == "/sources":
+            self.handle_sources()
         elif self.path == "/read/recent":
             self.handle_read_recent()
         elif self.path.split("?", 1)[0] == "/read/chapter":
@@ -1244,6 +2067,7 @@ class Handler(BaseHTTPRequestHandler):
                     "cover": j.get("cover"),
                     "split_mb": j.get("split_mb"),
                     "auto_chapters": j.get("auto_chapters"),
+                    "book_id": j.get("book_id"),
                 }
         out = []
         for it in by_id.values():
@@ -1389,6 +2213,10 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_clear_history()
         elif self.path == "/config":
             self.handle_set_config()
+        elif self.path == "/grab":
+            self.handle_grab()
+        elif self.path == "/convert_lib":
+            self.handle_convert_lib()
         elif self.path == "/bg/upload":
             self.handle_bg_upload()
         elif self.path == "/bg/delete":
@@ -2158,6 +2986,140 @@ class Handler(BaseHTTPRequestHandler):
 
         self._json(200, {"ok": True, "job_id": job_id})
 
+    def handle_sources(self):
+        """List configured web-novel sources (sources/*.json)."""
+        self._json(200, {"ok": True, "sources": [
+            {"id": s["id"],
+             "name": s.get("name") or s["id"],
+             "home": s.get("home") or "",
+             "encoding": s.get("encoding") or "auto"}
+            for s in SOURCES.values()]})
+
+    def handle_grab(self):
+        """Start a background grab job: a chapter page or a whole book from a
+        TOC page -> clean TXT stored in the library (+ downloadable)."""
+        data = self._read_json_body()
+        url = (data.get("url") or "").strip()
+        if not url or not url.startswith(("http://", "https://")):
+            self._json(400, {"error": "请输入以 http:// 或 https:// 开头的网址"})
+            return
+        source_id = (data.get("source_id") or "").strip()
+        source = SOURCES.get(source_id) if source_id else None
+        mode = (data.get("mode") or "auto").strip().lower()
+        if mode not in ("auto", "chapter", "toc"):
+            mode = "auto"
+        clean_ads = data.get("clean_ads", True)
+        if isinstance(clean_ads, str):
+            clean_ads = clean_ads.strip().lower() not in ("0", "false", "off", "no", "")
+        max_chapters = 0
+        try:
+            max_chapters = int(data.get("max_chapters") or 0)
+        except (TypeError, ValueError):
+            max_chapters = 0
+        cap = max_chapters or int(os.environ.get("TXT2EBOOK_GRAB_MAX_CHAPTERS")
+                                  or GRAB_MAX_CHAPTERS)
+        cap = min(max(1, cap), 20000)
+
+        job_id = uuid.uuid4().hex
+        with JOBS_LOCK:
+            _prune_jobs_locked()
+            JOBS[job_id] = {"status": "queued", "progress": 0, "kind": "grab",
+                            "url": url, "created": time.time(),
+                            "source": source_id or "auto", "mode": mode,
+                            "message": "准备抓取..."}
+        t = threading.Thread(target=run_grab, args=(job_id, url),
+                             kwargs={"source": source, "mode": mode,
+                                     "clean_ads": clean_ads,
+                                     "title_override": (data.get("title") or "").strip(),
+                                     "author_override": (data.get("author") or "").strip(),
+                                     "max_chapters": cap},
+                             daemon=True)
+        t.start()
+        self._json(200, {"ok": True, "job_id": job_id})
+
+    def handle_convert_lib(self):
+        """Convert a book already stored in the local library (e.g. fetched
+        from a web page) through the normal conversion pipeline."""
+        data = self._read_json_body()
+        book_id = (data.get("book_id") or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{16}", book_id):
+            self._json(400, {"error": "无效的书本 ID"})
+            return
+        content = READ_LIB / book_id / "content.txt"
+        if not content.is_file():
+            self._json(404, {"error": "本地库中找不到这本书"})
+            return
+        fmt = (data.get("format") or "mobi").lower().strip()
+        if fmt not in FORMATS:
+            self._json(400, {"error": f"不支持的格式: {fmt}"})
+            return
+        if fmt != "txt" and EBOOK_CONVERT is None:
+            self._json(500, {"error": "未检测到 Calibre(ebook-convert),无法转换"})
+            return
+        meta = {}
+        try:
+            meta = json.loads((READ_LIB / book_id / "meta.json")
+                              .read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        title = (data.get("title") or meta.get("title") or "").strip()
+        author = (data.get("author") or meta.get("author") or "").strip()
+
+        job_id = uuid.uuid4().hex
+        job_dir = output_base() / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            (job_dir / ".txt2ebook_job").write_text("1")
+        except OSError:
+            pass
+        stem = _safe_stem(title or book_id)
+        src_path = job_dir / (stem + ".src.txt")
+        shutil.copyfile(content, src_path)
+
+        nosplit = str(data.get("nosplit", "")).strip() \
+            in ("1", "true", "on", "yes")
+        auto_chapters = str(data.get("auto_chapters", "1")).strip().lower() \
+            not in ("0", "false", "off", "no", "")
+        clean_ads = str(data.get("clean_ads", "1")).strip().lower() \
+            not in ("0", "false", "off", "no", "")
+        chapter_re = (data.get("chapter_re") or "").strip()
+        split_mb = None
+        try:
+            raw_mb = str(data.get("split_mb") or "").strip()
+            if raw_mb and not nosplit:
+                split_mb = min(max(float(raw_mb), 1.0), 500.0)
+        except ValueError:
+            split_mb = None
+        retention_hours = None
+        try:
+            raw_rt = str(data.get("retention_hours") or "").strip()
+            if raw_rt:
+                retention_hours = min(max(float(raw_rt), 1.0), 24 * 30.0)
+        except ValueError:
+            retention_hours = None
+
+        with JOBS_LOCK:
+            _prune_jobs_locked()
+            JOBS[job_id] = {"status": "queued", "progress": 0, "kind": "convert",
+                            "format": fmt, "created": time.time(),
+                            "message": "已接收,准备中...", "nosplit": nosplit,
+                            "split_mb": split_mb, "auto_chapters": auto_chapters,
+                            "clean_ads": clean_ads, "book_id": book_id,
+                            "ttl": (retention_hours or (JOB_TTL / 3600)) * 3600}
+        t = threading.Thread(target=run_conversion,
+                             args=(job_id, src_path, fmt, stem, job_dir),
+                             kwargs={"nosplit": nosplit,
+                                     "split_mb": split_mb,
+                                     "auto_chapters": auto_chapters,
+                                     "clean_ads": clean_ads,
+                                     "title_override": title or None,
+                                     "author_override": author or None,
+                                     "chapter_re": chapter_re,
+                                     "retention_hours": retention_hours},
+                             daemon=True)
+        t.start()
+        self._json(200, {"ok": True, "job_id": job_id})
+
     def log_message(self, fmt, *args):
         sys.stderr.write("[%s] %s\n" % (self.address_string(), fmt % args))
 
@@ -2870,6 +3832,46 @@ INDEX_HTML = r"""<!DOCTYPE html>
     .rcontent { padding:18px 14px 50px; }
     .rtitle { max-width:30vw; }
   }
+  /* ================= web novel grabber ================= */
+  .webgrab {
+    margin-top:16px; padding:12px; border:1px dashed var(--border);
+    border-radius:12px; background:var(--bg2);
+  }
+  .webgrab .webhead { font-weight:700; font-size:13px; margin-bottom:10px; display:flex; align-items:center; gap:6px; }
+  .webgrab .webhead .note { font-weight:400; font-size:11px; color:var(--muted); }
+  .webrow { display:flex; gap:8px; margin-bottom:8px; align-items:center; flex-wrap:wrap; }
+  .webrow input[type=url] {
+    flex:1; min-width:180px; padding:8px 10px; border-radius:9px;
+    border:1px solid var(--border); background:var(--card); color:var(--fg); font-size:13px;
+  }
+  .webrow input[type=url]:focus { outline:none; border-color:var(--accent); }
+  .webrow select {
+    padding:7px 8px; border-radius:9px; border:1px solid var(--border);
+    background:var(--card); color:var(--fg); font-size:12px; max-width:46%;
+  }
+  .webrow label { display:flex; align-items:center; gap:5px; font-size:12px; color:var(--muted); cursor:pointer; }
+  .grabstatus { font-size:12px; margin-top:8px; word-break:break-all; }
+  .grabstatus.ok { color:var(--ok); }
+  .grabstatus.err { color:var(--err); }
+  .grabstatus a { color:var(--accent); }
+  .grabprog { display:none; margin-top:10px; align-items:center; gap:8px; }
+  .grabprog.show { display:flex; }
+  .grabprog .bar { flex:1; height:8px; border-radius:999px; background:var(--card); overflow:hidden; }
+  .grabprog .bar i { display:block; height:100%; width:0; background:var(--accent); border-radius:999px; transition:width .3s; }
+  .grabprog span { font-size:11px; color:var(--muted); white-space:nowrap; }
+  .grabLog {
+    display:none; margin-top:8px; max-height:150px; overflow-y:auto;
+    font-size:11px; line-height:1.6; color:var(--muted);
+    border:1px solid var(--border); border-radius:8px; padding:6px 8px;
+    white-space:pre-wrap; word-break:break-all;
+  }
+  .grabLog.show { display:block; }
+  .rurlrow { display:flex; gap:8px; margin:12px 0; }
+  .rurlrow input {
+    flex:1; min-width:0; padding:8px 10px; border-radius:9px;
+    border:1px solid var(--border); background:var(--card); color:var(--fg); font-size:13px;
+  }
+  .rurlrow input:focus { outline:none; border-color:var(--accent); }
 </style>
 </head>
 <body>
@@ -2955,6 +3957,29 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="batchhead"><span data-i18n="batchHead"></span><button id="batchClear">✕</button></div>
         <div class="batchlist" id="batchList"></div>
         <button class="btn" id="batchGo">⚡ <span data-i18n="batchGo"></span></button>
+      </div>
+
+      <div class="webgrab" id="webGrabBox">
+        <div class="webhead">🌐 <span data-i18n="webHead"></span> <span class="note" data-i18n="webSub"></span></div>
+        <div class="webrow">
+          <input type="url" id="grabUrl" placeholder="" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="webrow">
+          <select id="grabSource"></select>
+          <select id="grabMode">
+            <option value="auto" data-i18n="webModeAuto"></option>
+            <option value="chapter" data-i18n="webModeChapter"></option>
+            <option value="toc" data-i18n="webModeToc"></option>
+          </select>
+          <label><input type="checkbox" id="grabAds" checked> <span data-i18n="webAds"></span></label>
+        </div>
+        <div class="webrow">
+          <button class="btn" id="grabBtn">📥 <span data-i18n="webGo"></span></button>
+          <button class="btn cancel" id="grabCancelBtn" style="display:none">✕ <span data-i18n="webCancel"></span></button>
+        </div>
+        <div class="grabstatus" id="grabStatus"></div>
+        <div class="grabprog" id="grabProg"><div class="bar"><i id="grabBar"></i></div><span id="grabPct">0%</span></div>
+        <div class="grabLog" id="grabLog"></div>
       </div>
 
       <div class="step" data-i18n="step2"></div>
@@ -3100,6 +4125,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <p class="rnote" data-i18n="rNote"></p>
       <button class="btn" id="rLocal" data-i18n="rLocalBtn"></button>
       <input type="file" id="rFile" accept=".txt,.zip" hidden>
+      <div class="rurlrow">
+        <input type="url" id="rUrl" placeholder="" autocomplete="off" spellcheck="false">
+        <button class="btn" id="rUrlGo" data-i18n="rUrlGoBtn"></button>
+      </div>
       <div class="rrecent">
         <div class="rrecenthead" data-i18n="rRecent"></div>
         <div id="rRecentList"></div>
@@ -3162,6 +4191,19 @@ const histCount = document.getElementById('histCount');
 const histList = document.getElementById('histList');
 const langZh = document.getElementById('langZh');
 const langEn = document.getElementById('langEn');
+const grabUrl = document.getElementById('grabUrl');
+const grabSource = document.getElementById('grabSource');
+const grabMode = document.getElementById('grabMode');
+const grabAds = document.getElementById('grabAds');
+const grabBtn = document.getElementById('grabBtn');
+const grabCancelBtn = document.getElementById('grabCancelBtn');
+const grabStatus = document.getElementById('grabStatus');
+const grabProg = document.getElementById('grabProg');
+const grabBar = document.getElementById('grabBar');
+const grabPct = document.getElementById('grabPct');
+const grabLog = document.getElementById('grabLog');
+const rUrl = document.getElementById('rUrl');
+const rUrlGo = document.getElementById('rUrlGo');
 const bgmCb = document.getElementById('bgmCb');
 const bgDelFiles = document.getElementById('bgDelFiles');
 const themeBtn = document.getElementById('themeBtn');
@@ -3198,6 +4240,12 @@ const I18N = {
     needCalibre: '⚠️ 未检测到 Calibre(ebook-convert),无法转换。请安装 Calibre 或通过 start.bat 启动。',
     done: '转换完成', failed: '转换失败', cancelled: '已取消', jobLost: '任务已失效(服务可能重启过)', pack: '打包中…',
     upload: '上传中...', merging: '合并中…', merged: '已合并', download: '下载',
+    webHead: '网页小说导入', webSub: '粘贴目录页或章节页 URL · 仅自用',
+    webUrlPh: 'https://… 小说目录页或章节页', webMode: '模式',
+    webModeAuto: '自动', webModeChapter: '章节页', webModeToc: '目录页',
+    webSourceAuto: '自动识别书源', webGo: '抓取', webCancel: '取消',
+    webNoUrl: '请先输入网址', webStart: '开始抓取...', webRead: '阅读',
+    webConvert: '转电子书', webDone: '抓取完成', webAds: '清理广告',
   },
   en: {
     tag: 'Local · files never leave your PC · MOBI / AZW / AZW3 / EPUB / KFX',
@@ -3224,6 +4272,12 @@ const I18N = {
     needCalibre: '⚠️ Calibre (ebook-convert) not found. Install Calibre or use start.bat.',
     done: 'Done', failed: 'Failed', cancelled: 'Cancelled', jobLost: 'Job lost (server restarted?)', pack: 'Packaging…',
     upload: 'Uploading...', merging: 'Merging…', merged: 'Merged', download: 'Download',
+    webHead: 'Web novel import', webSub: 'paste a TOC or chapter URL · personal use only',
+    webUrlPh: 'https://… novel TOC or chapter page', webMode: 'Mode',
+    webModeAuto: 'Auto', webModeChapter: 'Chapter', webModeToc: 'TOC',
+    webSourceAuto: 'Auto-detect source', webGo: 'Fetch', webCancel: 'Cancel',
+    webNoUrl: 'Enter a URL first', webStart: 'Fetching...', webRead: 'Read',
+    webConvert: 'Convert', webDone: 'Fetched', webAds: 'Clean ads',
   },
 };
 let lang = 'zh';
@@ -3241,6 +4295,10 @@ function applyLang() {
   langZh.classList.toggle('on', lang === 'zh');
   langEn.classList.toggle('on', lang === 'en');
   document.querySelectorAll('[data-i18n]').forEach(el => { el.innerHTML = t(el.dataset.i18n); });
+  grabUrl.placeholder = t('webUrlPh');
+  rUrl.placeholder = t('rUrlPh');
+  const sa = grabSource.options[0];
+  if (sa) sa.textContent = t('webSourceAuto');
 }
 langZh.addEventListener('click', () => setLang('zh'));
 langEn.addEventListener('click', () => setLang('en'));
@@ -4170,6 +5228,165 @@ mergeBtn.addEventListener('click', async () => {
   }
 });
 
+// ================= web novel grabber =================
+let grabJobId = null;
+let grabFromReader = false;
+
+async function loadSources() {
+  try {
+    const r = await fetch('/sources');
+    const j = await r.json();
+    if (!j.ok) return;
+    grabSource.innerHTML = '<option value="">' + esc(t('webSourceAuto')) + '</option>'
+      + (j.sources || []).map(s => '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>').join('');
+  } catch (e) {}
+}
+
+function renderGrabLog(log) {
+  if (!log || !log.length) { grabLog.classList.remove('show'); return; }
+  grabLog.classList.add('show');
+  grabLog.textContent = log.join('\n');
+  grabLog.scrollTop = grabLog.scrollHeight;
+}
+
+function setGrabProg(pct) {
+  grabProg.classList.add('show');
+  grabBar.style.width = pct + '%';
+  grabPct.textContent = pct + '%';
+}
+
+async function reopenGrabBook(bookId) {
+  rSetStatus(t('rLoading'), true);
+  try {
+    const r = await fetch('/read/reopen', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ book_id: bookId }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || '');
+    startSession(j);
+  } catch (err) {
+    rSetStatus('❌ ' + err.message, false);
+  }
+}
+
+async function convertGrabBook(bookId) {
+  const fmt = document.querySelector('input[name=format]:checked').value;
+  const body = { book_id: bookId, format: fmt };
+  if (splitCb.checked) body.split_mb = splitMb.value; else body.nosplit = '1';
+  body.auto_chapters = autoCb.checked ? '1' : '0';
+  body.clean_ads = adsCb.checked ? '1' : '0';
+  const re = chapterRe.value.trim();
+  if (re) body.chapter_re = re;
+  const rt = retentionSel.value;
+  if (rt) body.retention_hours = rt;
+  status.className = 'status'; status.textContent = '';
+  warn.classList.remove('show'); warn.textContent = '';
+  cancelBtn.classList.remove('show');
+  setProgress(0, t('webConvert') + '...');
+  try {
+    const r = await fetch('/convert_lib', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || '');
+    trackJob(j.job_id);
+    refreshHistory();
+  } catch (e) {
+    status.className = 'status err';
+    status.textContent = '❌ ' + e.message;
+  }
+}
+
+function handleGrabUpdate(j) {
+  setProgress(j.progress || 0, j.message || '');
+  setGrabProg(j.progress || 0);
+  if (j.log && j.log.length) renderGrabLog(j.log);
+  if (j.status === 'done') {
+    grabBtn.disabled = false;
+    grabCancelBtn.style.display = 'none';
+    cancelBtn.classList.remove('show');
+    const mb = (j.size / 1048576).toFixed(2);
+    const links = [];
+    if (j.book_id) links.push('<a class="dl" href="#" data-act="read">📖 ' + esc(t('webRead')) + '</a>');
+    links.push('<a class="dl" href="' + esc(j.download) + '">⬇ ' + esc(t('download')) + ' TXT</a>');
+    if (j.book_id) links.push('<a class="dl" href="#" data-act="conv">⚡ ' + esc(t('webConvert')) + '</a>');
+    const html = '✅ ' + esc(j.message || t('webDone')) + ' (' + mb + ' MB)<br>' + links.join(' &nbsp; ');
+    grabStatus.className = 'grabstatus ok';
+    grabStatus.innerHTML = html;
+    status.className = 'status ok';
+    status.innerHTML = html;
+    if (j.book_id) {
+      const rd = grabStatus.querySelector('[data-act=read]');
+      if (rd) rd.onclick = (e) => { e.preventDefault(); reopenGrabBook(j.book_id); };
+      const cv = grabStatus.querySelector('[data-act=conv]');
+      if (cv) cv.onclick = (e) => { e.preventDefault(); convertGrabBook(j.book_id); };
+      if (grabFromReader) { grabFromReader = false; reopenGrabBook(j.book_id); }
+    }
+  } else if (j.status === 'error' || j.status === 'cancelled') {
+    grabBtn.disabled = false;
+    grabCancelBtn.style.display = 'none';
+    cancelBtn.classList.remove('show');
+    grabStatus.className = 'grabstatus err';
+    grabStatus.textContent = (j.status === 'cancelled' ? '⏹ ' : '❌ ') + (j.message || t('failed'));
+  }
+}
+
+async function startGrab(readerMode) {
+  const url = readerMode ? rUrl.value.trim() : grabUrl.value.trim();
+  if (!url) {
+    if (readerMode) rSetStatus('❌ ' + t('webNoUrl'), false);
+    else { grabStatus.className = 'grabstatus err'; grabStatus.textContent = '❌ ' + t('webNoUrl'); }
+    return;
+  }
+  if (!readerMode) {
+    grabStatus.className = 'grabstatus'; grabStatus.textContent = '';
+    grabLog.classList.remove('show'); grabLog.textContent = '';
+    grabBtn.disabled = true;
+    grabCancelBtn.style.display = 'inline-block';
+  }
+  const body = { url: url, mode: readerMode ? 'auto' : grabMode.value,
+                 source_id: grabSource.value,
+                 clean_ads: grabAds.checked ? '1' : '0' };
+  setProgress(0, t('webStart'));
+  try {
+    const r = await fetch('/grab', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || '');
+    grabJobId = j.job_id;
+    grabFromReader = !!readerMode;
+    if (readerMode) rSetStatus(t('webStart'), true);
+    trackJob(j.job_id);
+  } catch (e) {
+    if (readerMode) rSetStatus('❌ ' + e.message, false);
+    else {
+      grabBtn.disabled = false;
+      grabCancelBtn.style.display = 'none';
+      grabStatus.className = 'grabstatus err';
+      grabStatus.textContent = '❌ ' + e.message;
+    }
+  }
+}
+
+grabBtn.addEventListener('click', () => startGrab(false));
+grabCancelBtn.addEventListener('click', async () => {
+  if (!grabJobId) return;
+  grabCancelBtn.disabled = true;
+  try {
+    await fetch('/cancel', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: grabJobId }),
+    });
+  } catch (e) {}
+});
+rUrlGo.addEventListener('click', () => startGrab(true));
+rUrl.addEventListener('keydown', (e) => { if (e.key === 'Enter') startGrab(true); });
+grabUrl.addEventListener('keydown', (e) => { if (e.key === 'Enter') startGrab(false); });
+
 // ================= multi-job progress =================
 let activeJobs = new Set();
 let lastJobId = null;
@@ -4205,6 +5422,7 @@ async function pollAll() {
   if (++histTick % 3 === 0 || !activeJobs.size) refreshHistory();
 }
 function updateMain(j) {
+  if (j.kind === 'grab') { handleGrabUpdate(j); return; }
   setProgress(j.progress || 0, j.message || '');
   if (j.status === 'running' && j.progress > 0 && j.progress < 95 && j.created) {
     const elapsed = (Date.now() - j.created * 1000) / 1000;
@@ -4341,6 +5559,7 @@ loadBgList().then(() => {
   else if (savedTheme === 'custom') setTheme('default');
 });
 refreshHistory();
+loadSources();
 
 // ================= reader =================
 const rPrev = document.getElementById('rPrev');

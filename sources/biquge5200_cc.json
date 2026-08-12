@@ -1,0 +1,16 @@
+{
+  "id": "biquge5200_cc",
+  "name": "笔趣阁5200 (GBK)",
+  "home": "http://www.biquge5200.cc",
+  "url_re": "biquge5200\\.cc",
+  "encoding": "gbk",
+  "toc": {
+    "link_re": "第\\s*[0-9零一二三四五六七八九十百千两万]+\\s*[章节回卷]",
+    "dedupe": "keep_last"
+  },
+  "chapter": {
+    "title": [{"tag": "h1"}],
+    "content": [{"tag": "div", "id": "content"}],
+    "pagination": true
+  }
+}
