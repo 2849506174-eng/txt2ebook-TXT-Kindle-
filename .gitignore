@@ -6,6 +6,10 @@ readstate.json
 history.json
 config.json
 backgrounds.json
+server_run.log
+server_run.err
+srv*.log
+srv*.err
 
 # ---- python ----
 __pycache__/
