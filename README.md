@@ -23,6 +23,31 @@ python server.py
 
 ---
 
+## 安装 / 升级 / 卸载
+
+### 首次安装
+双击 **`start.bat`** 即可——它会自动检测并安装必需的依赖：
+
+| 组件 | 大小 | 必需? | 用途 |
+|------|------|--------|------|
+| Python 3.13 | ~60MB | ✅ 必需 | 程序运行环境 |
+| Calibre | ~200MB | ✅ 必需 | 转换引擎(mobi/epub 等) |
+| **Playwright + 浏览器内核** | ~30MB(+150MB) | ⬜ 可选 | 抓取 JS 动态加载的网站;系统有 Chrome/Edge 时**不用下载**内核 |
+| 7-Zip | ~5MB | ⬜ 可选 | 仅上传 RAR/7Z 压缩包时需要 |
+
+> 浏览器渲染组件(Playwright)不需要时完全不装——纯静态站照常抓。
+> 需要时运行 **`install_render.bat`**:自动装 Playwright;检测到系统 Chrome/Edge 就直接用(零下载),都没有才下载 Chromium(~150MB)。
+
+### 升级(装过旧版)
+双击 **`update.bat`**(git 克隆版)或手动从 GitHub 下载最新 `server.py` 与 `sources/` 覆盖。**升级不会动你的数据**:`library/`(书库)、`output/`(成品)、`config.json`(设置)、`history.json`(记录)都保留。
+
+### 卸载
+双击 **`uninstall.bat`**,按提示勾选:
+- 是否删除本地数据(书库/输出/记录/配置,选「否」可重装后继续用)
+- 是否卸载 Playwright / Calibre / Python(各自可勾选,不动其他软件)
+
+---
+
 ## 手机 / 平板访问(同一 WiFi)
 
 默认只在电脑本机打开(127.0.0.1)。想在手机/平板上用:
