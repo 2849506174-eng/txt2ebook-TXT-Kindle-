@@ -689,11 +689,13 @@ _AD_LINE_RE = re.compile(
     r"|更多精彩小说请访问\S*"
     r"|.*看后求收藏.*"
     r"|.*(?:最新|新)网址[：:]\S*"
+    r"|.*记住(?:新|旧)?域名.*"
     r"|.*更多内容加载中.*"
     r"|.*本站只支持手机浏览器访问.*"
+    r"|.*请勿开启浏览器阅读模式.*"
     r"|(?:上?—?页|下?—?页|上一页|下一页|目录|返回书页|章节目录|上?—?章|下?—?章|上一章|下一章|加入书签|本章未完[，,]?请(?:点击)?下一页继续阅读)"
     r"|(?:上?—?章|下?—?章|上一章|下一章|目录|书架|排行榜|返回|首页){2,}"
-    r"|^(?:首页|返回|我的|排行榜|书架|设置|搜索|加入书签|书签|关灯|护眼|夜间模式|推荐本书|章节列表|TXT下载|字[:：]?|大|中|小|←|→|上一章|下一章|目录|[\u4e00-\u9fff]{2,4}小说)$"
+    r"|^(?:首页|返回|我的|排行榜|书架|设置|搜索|加入书签|存书签|书签|关灯|护眼|夜间模式|推荐本书|章节列表|TXT下载|字[:：]?|大|中|小|←|→|上一章|下一章|目录|[\u4e00-\u9fff]{2,4}小说)$"
     r"|^[\u4e00-\u9fff·]{2,12}\s*>\s*[\u4e00-\u9fff·]{2,12}.*$"
     r")\s*$",
     re.IGNORECASE,
@@ -1333,10 +1335,11 @@ _COMMON_CONTENT_SELECTORS = [
     {"tag": "div", "id": "chaptercontent"},
     {"tag": "div", "class": "con"},
     {"tag": "div", "class": "content"},
+    {"tag": "div", "id": "txt"},
+    {"tag": "div", "class": "txt"},
     {"tag": "div", "class": "nr1"},
     {"tag": "div", "class": "nr"},
     {"tag": "div", "class": "read-content"},
-    {"tag": "div", "class": "txt"},
     {"tag": "div", "id": "booktxt"},
     {"tag": "div", "id": "BookText"},
     {"tag": "div", "class": "article-content"},
@@ -1611,8 +1614,9 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
             heading, body = _fetch_chapter_all(job_id, ch_url, html_c,
                                                source, enc,
                                                use_render=use_render)
-            # static page may be a JS shell: retry with the browser renderer
-            if (body is None or len(body.strip()) < 50) and not use_render:
+            # static page may be a JS shell / encrypted content: retry with
+            # the browser renderer when the body is suspiciously small
+            if (body is None or len(body.strip()) < 600) and not use_render:
                 try:
                     html_r, _f2, _m2 = _fetch_html(
                         ch_url, job_id, source, prefer_render=True,
@@ -1743,15 +1747,14 @@ def _ensure_render_worker():
                         page.set_default_timeout(RENDER_TIMEOUT)
                         page.goto(url, wait_until="domcontentloaded",
                                   timeout=RENDER_TIMEOUT)
-                        # JS-injected content needs a moment; wait a fixed
-                        # window first, then poll until the text length is
-                        # substantial AND stable (so we never grab a skeleton)
+                        # JS-injected content needs a moment; poll the text
+                        # length until it stabilizes at a substantial size
+                        # (never grab a skeleton), up to the deadline
                         if sel:
                             try:
                                 page.wait_for_selector(sel, timeout=12000)
                             except Exception:
                                 pass
-                        time.sleep(3.5)
                         last_len = -1
                         stable = 0
                         deadline = time.time() + 15
@@ -1766,7 +1769,7 @@ def _ensure_render_worker():
                             else:
                                 stable = 0
                                 last_len = ln
-                            if stable >= 3 and ln > 800:
+                            if stable >= 4 and ln > 800:
                                 break
                             time.sleep(0.5)
                         holder["html"] = page.content()
