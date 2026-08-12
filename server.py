@@ -1516,108 +1516,6 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
             "ads_removed": ads_total, "chapter_titles": [p.split("\n", 1)[0] for p in parts]}
 
 
-def _bing_site_search(domain, kw):
-    """Bing site: search as a fallback for sources without their own search.
-    Returns [{title, author, url}] for result links on the given domain."""
-    q = quote(f"{kw} site:{domain}")
-    url = "https://www.bing.com/search?q=" + q
-    try:
-        raw, _final = _http_fetch(url)
-    except GrabError:
-        return []
-    text = decode_web_bytes(raw)
-    out = []
-    seen = set()
-    for m in re.finditer(r'<li class="b_algo".*?</li>', text, re.S):
-        blk = m.group(0)
-        m2 = re.search(r'<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', blk, re.S)
-        if not m2:
-            continue
-        href = m2.group(1).strip()
-        title = _norm_line(re.sub(r"<[^>]+>", " ", m2.group(2)))
-        if domain not in href or not href.startswith(("http://", "https://")):
-            continue
-        if any(b in href for b in ("/author", "/zuozhe", "/tag", "/top",
-                                   "/sort", "/fenlei", "/quanben", ".html")):
-            continue  # not a book TOC page
-        clean = _clean_page_title(title)
-        if not clean:
-            continue
-        author = ""
-        m3 = re.search(r"<p[^>]*>(.*?)</p>", blk, re.S)
-        if m3:
-            cap = _norm_line(re.sub(r"<[^>]+>", " ", m3.group(1)))
-            am = re.search(r"([\u4e00-\u9fff·]{2,12})\s+(?:玄幻|仙侠|都市|科幻|言情|历史|游戏|灵异|悬疑|网游|体育|军事)", cap)
-            if am and am.group(1) != clean:
-                author = am.group(1)
-        u = href.split("?")[0]
-        if u in seen:
-            continue
-        seen.add(u)
-        out.append({"title": clean, "author": author, "url": u})
-    return out
-
-
-def _search_rank(hit, kw):
-    """Rank search hits: exact match > prefix > contains; author match adds
-    points; longer (often fanfic) titles lose a little."""
-    t = (hit.get("title") or "").lower()
-    k = kw.lower()
-    score = 10
-    if t == k:
-        score = 100
-    elif t.startswith(k):
-        score = 80
-    elif k in t:
-        score = 60
-    if k in (hit.get("author") or "").lower():
-        score += 15
-    score -= min(len(t), 40) * 0.3
-    return score
-
-
-def _parse_search(html_text, source):
-    """Parse a site search results page into [{title, author, url}]. The
-    page is split into <dl>/<li> blocks; a block counts when it contains a
-    link matching the source's result_re."""
-    cfg = source.get("search") or {}
-    try:
-        rx = re.compile(cfg.get("result_re") or r"/book/\d+_\d+/")
-    except re.error:
-        rx = re.compile(r"/book/\d+_\d+/")
-    results = []
-    seen = set()
-    for blk in re.split(r"<(?:dl|li)[\s>]", html_text)[1:]:
-        m = re.search(r'<a[^>]*href\s*=\s*["\']([^"\']+)["\']', blk)
-        if not m or not rx.search(m.group(1)):
-            continue
-        url = urljoin(source.get("home") or "", m.group(1).strip())
-        if url in seen:
-            continue
-        seen.add(url)
-        title = ""
-        tm = re.search(r'title\s*=\s*["\']([^"\']+)["\']', blk)
-        if tm:
-            title = html_mod.unescape(tm.group(1)).strip()
-        if not title:
-            tm2 = re.search(r"<dt[^>]*>(.*?)</dt>", blk, re.S)
-            if tm2:
-                title = _norm_line(re.sub(r"<[^>]+>", "", tm2.group(1)))
-        author = ""
-        am = re.search(r"作\s*者\s*[:：]\s*([^<>\s]{2,20})", blk)
-        if am:
-            author = am.group(1).strip()
-        else:
-            dds = re.findall(r"<dd[^>]*>(.*?)</dd>", blk, re.S)
-            if len(dds) >= 2:
-                am2 = re.search(r"<a[^>]*>([^<]{2,20})</a>", dds[-1])
-                if am2:
-                    author = am2.group(1).strip()
-        results.append({"title": title or "未命名", "author": author,
-                        "url": url})
-    return results
-
-
 def _run_grab_body(job_id, url, source, mode, clean_ads, title_override,
                    author_override, max_chapters, _log):
     raw, final_url = _http_fetch(url, job_id)
@@ -2175,8 +2073,6 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_bg_list()
         elif self.path == "/sources":
             self.handle_sources()
-        elif self.path.split("?", 1)[0] == "/search":
-            self.handle_search()
         elif self.path == "/read/recent":
             self.handle_read_recent()
         elif self.path.split("?", 1)[0] == "/read/chapter":
@@ -3165,42 +3061,6 @@ class Handler(BaseHTTPRequestHandler):
              "encoding": s.get("encoding") or "auto"}
             for s in SOURCES.values()]})
 
-    def handle_search(self):
-        """Search configured sources for a book title. GET /search?q=书名
-        (&source=可选书源id). Returns [{source, title, author, url}]."""
-        from urllib.parse import parse_qs, urlparse
-        q = parse_qs(urlparse(self.path).query)
-        kw = (q.get("q") or [""])[0].strip()
-        if not kw:
-            self._json(400, {"error": "请输入书名关键词"})
-            return
-        source_id = (q.get("source") or [""])[0].strip()
-        results = []
-        for s in SOURCES.values():
-            if source_id and s["id"] != source_id:
-                continue
-            scfg = s.get("search") or {}
-            if scfg.get("url"):
-                try:
-                    url = scfg["url"].replace("{kw}", quote(kw))
-                    raw, _final = _http_fetch(url)
-                    text = decode_web_bytes(raw, s.get("encoding"))
-                    for h in _parse_search(text, s):
-                        h["source_id"] = s["id"]
-                        h["source"] = s.get("name") or s["id"]
-                        results.append(h)
-                except GrabError:
-                    pass
-            # sources without their own search: fall back to Bing site:
-            if s.get("bing_site") and not source_id:
-                dom = urlparse((s.get("home") or "")).netloc or s.get("id")
-                for h in _bing_site_search(dom, kw):
-                    h["source_id"] = s["id"]
-                    h["source"] = s.get("name") or s["id"]
-                    results.append(h)
-        results.sort(key=lambda h: _search_rank(h, kw), reverse=True)
-        self._json(200, {"ok": True, "q": kw, "results": results})
-
     def handle_grab(self):
         """Start a background grab job: a chapter page or a whole book from a
         TOC page -> clean TXT stored in the library (+ downloadable)."""
@@ -4064,23 +3924,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .grabstatus.ok { color:var(--ok); }
   .grabstatus.err { color:var(--err); }
   .grabstatus a { color:var(--accent); }
-  .grabsearch { display:none; margin-top:8px; }
-  .grabsearch.show { display:block; }
-  .grabsearch .gshint { font-size:11px; color:var(--muted); margin-bottom:6px; }
-  .grabsearch .gsitem {
-    display:flex; align-items:center; gap:8px; padding:7px 10px; margin-bottom:5px;
-    background:var(--card); border:1px solid var(--border); border-radius:9px;
-    font-size:12px; cursor:pointer;
-  }
-  .grabsearch .gsitem:hover { border-color:var(--accent); }
-  .grabsearch .gsitem .gst {
-    flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  }
-  .grabsearch .gsitem .gsm { color:var(--muted); font-size:11px; white-space:nowrap; }
-  .grabsearch .gsitem .gsgo { color:var(--accent); white-space:nowrap; }
-  .grabsearch .gsitem.picked { opacity:.55; cursor:default; }
-  .grabsearch .gsitem.picked:hover { border-color:var(--border); }
-  .grabsearch .gsitem.picked .gsgo { color:var(--muted); }
   .grabprog { display:none; margin-top:10px; align-items:center; gap:8px; }
   .grabprog.show { display:flex; }
   .grabprog .bar { flex:1; height:8px; border-radius:999px; background:var(--card); overflow:hidden; }
@@ -4343,11 +4186,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
           <input type="url" id="grabUrl" placeholder="" autocomplete="off" spellcheck="false">
         </div>
         <div class="webrow">
-          <input type="text" id="grabSearchKw" placeholder="" autocomplete="off" spellcheck="false">
-          <button class="btn" id="grabSearchBtn" data-tip="tipSearch">🔍 <span data-i18n="webSearch"></span></button>
-        </div>
-        <div class="grabsearch" id="grabSearchResults"></div>
-        <div class="webrow">
           <select id="grabSource"></select>
           <select id="grabMode">
             <option value="auto" data-i18n="webModeAuto"></option>
@@ -4426,9 +4264,6 @@ const histCount = document.getElementById('histCount');
 const histList = document.getElementById('histList');
 const langZh = document.getElementById('langZh');
 const langEn = document.getElementById('langEn');
-const grabSearchKw = document.getElementById('grabSearchKw');
-const grabSearchBtn = document.getElementById('grabSearchBtn');
-const grabSearchResults = document.getElementById('grabSearchResults');
 const grabUrl = document.getElementById('grabUrl');
 const grabSource = document.getElementById('grabSource');
 const grabMode = document.getElementById('grabMode');
@@ -4482,10 +4317,6 @@ const I18N = {
     webSourceAuto: '自动识别书源', webGo: '抓取', webCancel: '取消',
     webNoUrl: '请先输入网址', webStart: '开始抓取...', webRead: '阅读',
     webConvert: '转电子书', webDone: '抓取完成', webAds: '清理广告', rUrlLabel: '网址', rClearRecent: '清空',
-    webSearch: '搜书', webSearchPh: '输入书名,在各书源站搜索(可搜到即点即抓)', webSearching: '搜索中...',
-    webSearchEmpty: '没有找到结果', webSearchFail: '搜索失败', webPick: '点击结果:填入网址后手动抓取',
-    webFilled: '已填入,点「抓取」开始(按目录页整本抓取)',
-    tipSearch: '输入书名,在支持站内搜索的书源站查找同名书',
     tipGo: '按当前设置转换所选文件(可先看右侧预览)', tipMerge: '只合并 TXT,不调用 Calibre 转换',
     tipGrab: '粘贴小说目录页或章节页网址后点击,抓取结果自动存入书库', tipGrabCancel: '取消正在进行的抓取',
     tipCancel: '取消当前正在转换/抓取的任务', tipReaderUrl: '粘贴小说网址(目录页/章节页),抓取后自动打开阅读',
@@ -4524,10 +4355,6 @@ const I18N = {
     webSourceAuto: 'Auto-detect source', webGo: 'Fetch', webCancel: 'Cancel',
     webNoUrl: 'Enter a URL first', webStart: 'Fetching...', webRead: 'Read',
     webConvert: 'Convert', webDone: 'Fetched', webAds: 'Clean ads', rUrlLabel: 'URL', rClearRecent: 'Clear',
-    webSearch: 'Search', webSearchPh: 'Search a title across sources, click a hit to fetch', webSearching: 'Searching...',
-    webSearchEmpty: 'no results', webSearchFail: 'search failed', webPick: 'click a hit to fill the URL, then fetch',
-    webFilled: 'filled - click Fetch to start (whole book from TOC)',
-    tipSearch: 'Search a title on sources that support site search',
     tipGo: 'Convert selected files with current settings (see preview first)', tipMerge: 'Merge TXT only, no Calibre conversion',
     tipGrab: 'Paste a novel TOC/chapter URL, result is saved to the library', tipGrabCancel: 'Cancel the running grab',
     tipCancel: 'Cancel the running conversion/grab job', tipReaderUrl: 'Paste a novel URL (TOC/chapter), auto-opens in the reader after fetching',
@@ -4553,7 +4380,6 @@ function applyLang() {
   document.querySelectorAll('[data-i18n]').forEach(el => { el.innerHTML = t(el.dataset.i18n); });
   document.querySelectorAll('[data-tip]').forEach(el => { el.title = t(el.dataset.tip); });
   grabUrl.placeholder = t('webUrlPh');
-  grabSearchKw.placeholder = t('webSearchPh');
   const sa = grabSource.options[0];
   if (sa) sa.textContent = t('webSourceAuto');
 }
@@ -5615,48 +5441,6 @@ async function startGrab() {
 }
 
 grabBtn.addEventListener('click', () => startGrab());
-
-grabSearchBtn.addEventListener('click', () => doSearch());
-grabSearchKw.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
-
-async function doSearch() {
-  const kw = grabSearchKw.value.trim();
-  if (!kw) return;
-  grabSearchResults.classList.add('show');
-  grabSearchResults.innerHTML = '<div class="gshint">' + esc(t('webSearching')) + '</div>';
-  try {
-    const r = await fetch('/search?q=' + encodeURIComponent(kw));
-    const j = await r.json();
-    if (!j.ok) throw new Error(j.error || '');
-    const hits = j.results || [];
-    if (!hits.length) {
-      grabSearchResults.innerHTML = '<div class="gshint">' + esc(t('webSearchEmpty')) + '</div>';
-      return;
-    }
-    grabSearchResults.innerHTML = '<div class="gshint">' + esc(t('webPick')) + ' (' + hits.length + ')</div>'
-      + hits.map((h, i) => {
-          const au = h.author ? ' · ' + esc(h.author) : '';
-          return '<div class="gsitem" data-i="' + i + '"><span class="gst">' + esc(h.title) + au + '</span>'
-            + '<span class="gsm">' + esc(h.source) + '</span><span class="gsgo">📥</span></div>';
-        }).join('');
-    grabSearchResults.querySelectorAll('.gsitem').forEach(el => {
-      el.addEventListener('click', () => {
-        const h = hits[+el.dataset.i];
-        if (!h) return;
-        // fill the URL and switch to TOC mode (search hits are book TOC
-        // pages); the user clicks 抓取 to start - no auto-fetching
-        grabUrl.value = h.url;
-        grabMode.value = 'toc';
-        grabStatus.className = 'grabstatus ok';
-        grabStatus.textContent = '✅ ' + esc(h.title)
-          + (h.author ? ' · ' + esc(h.author) : '') + ' — ' + t('webFilled');
-        grabUrl.focus();
-      });
-    });
-  } catch (e) {
-    grabSearchResults.innerHTML = '<div class="gshint">❌ ' + esc(t('webSearchFail')) + ': ' + esc(e.message) + '</div>';
-  }
-}
 
 // delegate clicks on 阅读/转电子书 links (they appear in the reader panel
 // AND the main status area, so a single delegated handler covers both)
