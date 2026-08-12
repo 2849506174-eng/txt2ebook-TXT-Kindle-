@@ -1,8 +1,0 @@
-修复阅读器"只有一半"根因:rcontent 与 ropen 抢占高度
-
-- 根因:.rcontent(阅读正文容器)与 .ropen 都是 flex:1,阅读器打开时
-  两者各占一半高度,空白的 rcontent 吃掉下半部分
-- 修复:.rcontent 默认 display:none,openReader 显式隐藏、startSession
-  时显示,打开页的 ropen 独占全部高度,最近阅读贴底
-- 用 Edge 无头浏览器实测布局数据:ropen 高度 318px -> 674px(撑满),
-  最近阅读贴底,右侧转换界面可见
