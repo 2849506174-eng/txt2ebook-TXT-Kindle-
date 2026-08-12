@@ -1,6 +1,8 @@
-修复:页面禁止缓存 + 阅读器撑满布局加固
+修复阅读器"只有一半"根因:rcontent 与 ropen 抢占高度
 
-- 所有响应加 Cache-Control: no-store,避免浏览器缓存旧版页面
-  (之前快速迭代时用户可能看到旧 UI,误以为改动没生效)
-- .ropen 加 min-height:0(flex 子项默认 min-height:auto 会干扰滚动/拉伸),
-  ropenbox 保持 min-height:100% + 最近阅读贴底,确保打开页撑满抽屉高度
+- 根因:.rcontent(阅读正文容器)与 .ropen 都是 flex:1,阅读器打开时
+  两者各占一半高度,空白的 rcontent 吃掉下半部分
+- 修复:.rcontent 默认 display:none,openReader 显式隐藏、startSession
+  时显示,打开页的 ropen 独占全部高度,最近阅读贴底
+- 用 Edge 无头浏览器实测布局数据:ropen 高度 318px -> 674px(撑满),
+  最近阅读贴底,右侧转换界面可见

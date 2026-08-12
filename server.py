@@ -3939,7 +3939,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .rstatus.err { color:var(--err); }
   .rstatus.ok { color:var(--ok); }
   .rcontent {
-    flex:1; overflow-y:auto; padding:26px 22px 60px;
+    display:none; flex:1; overflow-y:auto; padding:26px 22px 60px;
     font-size:18px; line-height:1.9; max-width:900px; width:100%;
     margin:0 auto; box-sizing:border-box;
   }
@@ -5806,6 +5806,8 @@ function openReader() {
   }
   reader.classList.add('show');
   ropen.style.display = 'flex';
+  rContent.style.display = 'none';
+  ropen.style.display = 'flex';
   rtoolbar.style.display = 'flex';
   rContent.innerHTML = '';
   rStatus.textContent = '';
@@ -5822,6 +5824,7 @@ function closeReader() {
   document.body.classList.remove('pure');
   state.sid = null;
   clearTimeout(pureTimer);
+  rContent.style.display = 'none';
 }
 
 function startSession(j) {
@@ -5829,6 +5832,7 @@ function startSession(j) {
   state.bookId = j.book_id || null;
   state.bookmarks = j.bookmarks ? j.bookmarks.map(b => b.chapter) : [];
   ropen.style.display = 'none';
+  rContent.style.display = 'block';
   rTitle.textContent = j.title;
   rChapter.innerHTML = '';
   j.chapter_titles.forEach((ct, i) => {
