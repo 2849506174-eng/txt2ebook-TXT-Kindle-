@@ -1217,15 +1217,18 @@ def _toc_pages(base_url, html_text, pages_cfg, visited):
     return out
 
 
-def _chapter_pages(base_url, html_text):
+def _chapter_pages(base_url, html_text, use_text_fallback=True):
     """Additional page URLs for a multi-page chapter (x.html -> x_2.html,
     x_3.html ...). Same-stem numeric links are authoritative; the 下一页/下页
-    text fallback is only used when the chapter has no same-stem paging (so a
-    "next chapter" link is never mistaken for a page of this chapter)."""
+    text fallback (``use_text_fallback``) is only used when the chapter has
+    no same-stem paging - iterative paging walks must disable it so the
+    "next chapter" link is never mistaken for a page of this chapter."""
     pages = []
     path = urlparse(base_url).path
     stem = path.rsplit("/", 1)[-1]
     stem_noext, ext = os.path.splitext(stem)
+    # a paged URL (xxx-2.html / xxx_3.html) must still match sibling pages
+    stem_noext = re.sub(r"[-_]\d+$", "", stem_noext)
     if not stem_noext:
         return pages
     text_hits = []
@@ -1240,7 +1243,7 @@ def _chapter_pages(base_url, html_text):
                       + r"[-_](\d+)\." + re.escape(ext.lstrip(".")) + r"$", name)
         if mm:
             pages.append((int(mm.group(1)), urljoin(base_url, href)))
-        elif tx in ("下一页", "下页", "第2页") \
+        elif use_text_fallback and tx in ("下一页", "下页", "第2页") \
                 and not href.lower().startswith(("javascript:", "#")):
             text_hits.append(urljoin(base_url, href))
     if not pages:
@@ -1375,23 +1378,35 @@ def _grab_single_chapter(job_id, url, html_text, final_url, source, enc,
         raise GrabError("未能提取到正文(页面可能需要登录、是动态页面或使用字体反爬/图片章节)")
     if clean_ads:
         content, _removed = _clean_ad_lines(content)
+    # iteratively follow ALL pages of a multi-page chapter
     pages = _chapter_pages(final_url, html_text)
     if pages:
-        _log(f"章节有 {len(pages) + 1} 页,正在抓取剩余页面...")
-        for i, pu in enumerate(pages, 1):
+        _log(f"章节有多个分页,正在抓取剩余页面...")
+        seen = {final_url}
+        cur_url, cur_html = final_url, html_text
+        for _hop in range(15):
             if _is_cancelled(job_id):
                 raise GrabError("cancelled")
+            nxt = None
+            for pu in _chapter_pages(cur_url, cur_html, use_text_fallback=False):
+                if pu not in seen:
+                    nxt = pu
+                    break
+            if nxt is None:
+                break
+            seen.add(nxt)
             try:
-                raw2, _ = _http_fetch(pu, job_id)
+                raw2, _ = _http_fetch(nxt, job_id, referer=cur_url)
                 html2 = decode_web_bytes(raw2, enc)
-                _t, part = _extract_chapter(html2, source, pu)
-                if part and not _looks_obfuscated(part):
-                    if clean_ads:
-                        part, _r2 = _clean_ad_lines(part)
-                    content = content.rstrip() + "\n\n" + part.strip()
-                set_job(job_id, progress=30 + int(i / (len(pages) + 1) * 30))
             except GrabError:
-                continue
+                break
+            _t, part = _extract_chapter(html2, source, nxt)
+            if part and not _looks_obfuscated(part):
+                if clean_ads:
+                    part, _r2 = _clean_ad_lines(part)
+                content = content.rstrip() + "\n\n" + part.strip()
+            cur_url, cur_html = nxt, html2
+            set_job(job_id, progress=30 + min(40, _hop * 8))
     m = re.search(r"<title>([^<]*)</title>", html_text, re.S | re.I)
     page_title = _clean_page_title(m.group(1)) if m else ""
     book_title = page_title or title or "未命名章节"
@@ -1409,6 +1424,40 @@ def _grab_single_chapter(job_id, url, html_text, final_url, source, enc,
         content = heading + "\n" + content
     return {"title": book_title, "text": content, "chapters": 1,
             "chapter_titles": [title or book_title]}
+
+
+def _fetch_chapter_all(job_id, ch_url, html_c, source, enc):
+    """Extract a chapter and iteratively follow ALL of its pages
+    (xxx_2.html, xxx_3.html ...). Returns (heading, full_body)."""
+    heading, body = _extract_chapter(html_c, source, ch_url)
+    if body is None:
+        return heading, body
+    current_url = ch_url
+    current_html = html_c
+    seen = {ch_url}
+    for _hop in range(15):
+        if _is_cancelled(job_id):
+            raise GrabError("cancelled")
+        nxt = None
+        for pu in _chapter_pages(current_url, current_html,
+                                 use_text_fallback=False):
+            if pu not in seen:
+                nxt = pu
+                break
+        if nxt is None:
+            break
+        seen.add(nxt)
+        try:
+            raw_p, _ = _http_fetch(nxt, job_id, referer=current_url)
+            html_p = decode_web_bytes(raw_p, enc)
+        except GrabError:
+            break
+        _t, part = _extract_chapter(html_p, source, nxt)
+        if part and not _looks_obfuscated(part):
+            body = body.rstrip() + "\n\n" + part.strip()
+        current_url = nxt
+        current_html = html_p
+    return heading, body
 
 
 def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
@@ -1467,26 +1516,14 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
         try:
             raw_c, _ = _http_fetch(ch_url, job_id, referer=final_url)
             html_c = decode_web_bytes(raw_c, enc)
-            heading, body = _extract_chapter(html_c, source, ch_url)
+            heading, body = _fetch_chapter_all(job_id, ch_url, html_c,
+                                               source, enc)
             if body is None or len(body.strip()) < 50:
                 skipped.append((ch_title, "空内容/图片章节"))
                 body = None
             elif _looks_obfuscated(body):
                 skipped.append((ch_title, "疑似字体反爬"))
                 body = None
-            else:
-                # multi-page chapters: follow xxx_2.html / xxx-2.html
-                for pu in _chapter_pages(ch_url, html_c):
-                    if _is_cancelled(job_id):
-                        raise GrabError("cancelled")
-                    try:
-                        raw_p, _ = _http_fetch(pu, job_id, referer=ch_url)
-                        html_p = decode_web_bytes(raw_p, enc)
-                        _t, part = _extract_chapter(html_p, source, pu)
-                        if part and not _looks_obfuscated(part):
-                            body = body.rstrip() + "\n\n" + part.strip()
-                    except GrabError:
-                        continue
         except GrabError as e:
             skipped.append((ch_title, str(e)))
             body = None
