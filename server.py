@@ -3913,8 +3913,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
     padding:5px 8px; border:1px solid var(--border); border-radius:8px;
     background:var(--bg); color:var(--fg); font-size:12px; max-width:34vw;
   }
-  .ropen { flex:1; display:block; overflow-y:auto; padding:24px; }
-  .ropenbox { width:100%; max-width:520px; margin:0 auto; }
+  .ropen { flex:1; display:flex; overflow-y:auto; padding:24px; }
+  .ropenbox {
+    width:100%; max-width:520px; margin:0 auto;
+    display:flex; flex-direction:column; min-height:100%;
+  }
+  .ropenbox .rrecent { margin-top:auto; }
   .ropenbox h2 { margin:0 0 8px; font-size:20px; }
   .rnote { color:var(--muted); font-size:13px; margin:0 0 18px; line-height:1.6; }
   .rrecent { margin-top:16px; }
