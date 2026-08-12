@@ -1498,6 +1498,48 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
             "ads_removed": ads_total, "chapter_titles": [p.split("\n", 1)[0] for p in parts]}
 
 
+def _parse_search(html_text, source):
+    """Parse a site search results page into [{title, author, url}]. The
+    page is split into <dl>/<li> blocks; a block counts when it contains a
+    link matching the source's result_re."""
+    cfg = source.get("search") or {}
+    try:
+        rx = re.compile(cfg.get("result_re") or r"/book/\d+_\d+/")
+    except re.error:
+        rx = re.compile(r"/book/\d+_\d+/")
+    results = []
+    seen = set()
+    for blk in re.split(r"<(?:dl|li)[\s>]", html_text)[1:]:
+        m = re.search(r'<a[^>]*href\s*=\s*["\']([^"\']+)["\']', blk)
+        if not m or not rx.search(m.group(1)):
+            continue
+        url = urljoin(source.get("home") or "", m.group(1).strip())
+        if url in seen:
+            continue
+        seen.add(url)
+        title = ""
+        tm = re.search(r'title\s*=\s*["\']([^"\']+)["\']', blk)
+        if tm:
+            title = html_mod.unescape(tm.group(1)).strip()
+        if not title:
+            tm2 = re.search(r"<dt[^>]*>(.*?)</dt>", blk, re.S)
+            if tm2:
+                title = _norm_line(re.sub(r"<[^>]+>", "", tm2.group(1)))
+        author = ""
+        am = re.search(r"作\s*者\s*[:：]\s*([^<>\s]{2,20})", blk)
+        if am:
+            author = am.group(1).strip()
+        else:
+            dds = re.findall(r"<dd[^>]*>(.*?)</dd>", blk, re.S)
+            if len(dds) >= 2:
+                am2 = re.search(r"<a[^>]*>([^<]{2,20})</a>", dds[-1])
+                if am2:
+                    author = am2.group(1).strip()
+        results.append({"title": title or "未命名", "author": author,
+                        "url": url})
+    return results
+
+
 def _run_grab_body(job_id, url, source, mode, clean_ads, title_override,
                    author_override, max_chapters, _log):
     raw, final_url = _http_fetch(url, job_id)
@@ -2053,6 +2095,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_bg_list()
         elif self.path == "/sources":
             self.handle_sources()
+        elif self.path.split("?", 1)[0] == "/search":
+            self.handle_search()
         elif self.path == "/read/recent":
             self.handle_read_recent()
         elif self.path.split("?", 1)[0] == "/read/chapter":
@@ -3041,6 +3085,35 @@ class Handler(BaseHTTPRequestHandler):
              "encoding": s.get("encoding") or "auto"}
             for s in SOURCES.values()]})
 
+    def handle_search(self):
+        """Search configured sources for a book title. GET /search?q=书名
+        (&source=可选书源id). Returns [{source, title, author, url}]."""
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        kw = (q.get("q") or [""])[0].strip()
+        if not kw:
+            self._json(400, {"error": "请输入书名关键词"})
+            return
+        source_id = (q.get("source") or [""])[0].strip()
+        results = []
+        for s in SOURCES.values():
+            if source_id and s["id"] != source_id:
+                continue
+            scfg = s.get("search")
+            if not scfg or not scfg.get("url"):
+                continue
+            try:
+                url = scfg["url"].replace("{kw}", quote(kw))
+                raw, _final = _http_fetch(url)
+                text = decode_web_bytes(raw, s.get("encoding"))
+                for h in _parse_search(text, s):
+                    h["source_id"] = s["id"]
+                    h["source"] = s.get("name") or s["id"]
+                    results.append(h)
+            except GrabError:
+                continue
+        self._json(200, {"ok": True, "q": kw, "results": results})
+
     def handle_grab(self):
         """Start a background grab job: a chapter page or a whole book from a
         TOC page -> clean TXT stored in the library (+ downloadable)."""
@@ -3895,6 +3968,20 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .grabstatus.ok { color:var(--ok); }
   .grabstatus.err { color:var(--err); }
   .grabstatus a { color:var(--accent); }
+  .grabsearch { display:none; margin-top:8px; }
+  .grabsearch.show { display:block; }
+  .grabsearch .gshint { font-size:11px; color:var(--muted); margin-bottom:6px; }
+  .grabsearch .gsitem {
+    display:flex; align-items:center; gap:8px; padding:7px 10px; margin-bottom:5px;
+    background:var(--card); border:1px solid var(--border); border-radius:9px;
+    font-size:12px; cursor:pointer;
+  }
+  .grabsearch .gsitem:hover { border-color:var(--accent); }
+  .grabsearch .gsitem .gst {
+    flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .grabsearch .gsitem .gsm { color:var(--muted); font-size:11px; white-space:nowrap; }
+  .grabsearch .gsitem .gsgo { color:var(--accent); white-space:nowrap; }
   .grabprog { display:none; margin-top:10px; align-items:center; gap:8px; }
   .grabprog.show { display:flex; }
   .grabprog .bar { flex:1; height:8px; border-radius:999px; background:var(--card); overflow:hidden; }
@@ -4012,6 +4099,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="webrow">
           <input type="url" id="grabUrl" placeholder="" autocomplete="off" spellcheck="false">
         </div>
+        <div class="webrow">
+          <input type="text" id="grabSearchKw" placeholder="" autocomplete="off" spellcheck="false">
+          <button class="btn" id="grabSearchBtn" data-tip="tipSearch">🔍 <span data-i18n="webSearch"></span></button>
+        </div>
+        <div class="grabsearch" id="grabSearchResults"></div>
         <div class="webrow">
           <select id="grabSource"></select>
           <select id="grabMode">
@@ -4241,7 +4333,9 @@ const histCount = document.getElementById('histCount');
 const histList = document.getElementById('histList');
 const langZh = document.getElementById('langZh');
 const langEn = document.getElementById('langEn');
-const grabUrl = document.getElementById('grabUrl');
+const grabSearchKw = document.getElementById('grabSearchKw');
+const grabSearchBtn = document.getElementById('grabSearchBtn');
+const grabSearchResults = document.getElementById('grabSearchResults');
 const grabSource = document.getElementById('grabSource');
 const grabMode = document.getElementById('grabMode');
 const grabAds = document.getElementById('grabAds');
@@ -4296,6 +4390,9 @@ const I18N = {
     webSourceAuto: '自动识别书源', webGo: '抓取', webCancel: '取消',
     webNoUrl: '请先输入网址', webStart: '开始抓取...', webRead: '阅读',
     webConvert: '转电子书', webDone: '抓取完成', webAds: '清理广告', rUrlLabel: '网址', rClearRecent: '清空',
+    webSearch: '搜书', webSearchPh: '输入书名,在各书源站搜索(可搜到即点即抓)', webSearching: '搜索中...',
+    webSearchEmpty: '没有找到结果', webSearchFail: '搜索失败', webPick: '点击抓取该书',
+    tipSearch: '输入书名,在支持站内搜索的书源站查找同名书',
     tipGo: '按当前设置转换所选文件(可先看右侧预览)', tipMerge: '只合并 TXT,不调用 Calibre 转换',
     tipGrab: '粘贴小说目录页或章节页网址后点击,抓取结果自动存入书库', tipGrabCancel: '取消正在进行的抓取',
     tipCancel: '取消当前正在转换/抓取的任务', tipReaderUrl: '粘贴小说网址(目录页/章节页),抓取后自动打开阅读',
@@ -4334,6 +4431,9 @@ const I18N = {
     webSourceAuto: 'Auto-detect source', webGo: 'Fetch', webCancel: 'Cancel',
     webNoUrl: 'Enter a URL first', webStart: 'Fetching...', webRead: 'Read',
     webConvert: 'Convert', webDone: 'Fetched', webAds: 'Clean ads', rUrlLabel: 'URL', rClearRecent: 'Clear',
+    webSearch: 'Search', webSearchPh: 'Search a title across sources, click a hit to fetch', webSearching: 'Searching...',
+    webSearchEmpty: 'no results', webSearchFail: 'search failed', webPick: 'click to fetch',
+    tipSearch: 'Search a title on sources that support site search',
     tipGo: 'Convert selected files with current settings (see preview first)', tipMerge: 'Merge TXT only, no Calibre conversion',
     tipGrab: 'Paste a novel TOC/chapter URL, result is saved to the library', tipGrabCancel: 'Cancel the running grab',
     tipCancel: 'Cancel the running conversion/grab job', tipReaderUrl: 'Paste a novel URL (TOC/chapter), auto-opens in the reader after fetching',
@@ -4360,6 +4460,7 @@ function applyLang() {
   document.querySelectorAll('[data-tip]').forEach(el => { el.title = t(el.dataset.tip); });
   grabUrl.placeholder = t('webUrlPh');
   rUrl.placeholder = t('rUrlPh');
+  grabSearchKw.placeholder = t('webSearchPh');
   const sa = grabSource.options[0];
   if (sa) sa.textContent = t('webSourceAuto');
 }
@@ -5436,6 +5537,44 @@ async function startGrab(readerMode) {
 }
 
 grabBtn.addEventListener('click', () => startGrab(false));
+
+grabSearchBtn.addEventListener('click', () => doSearch());
+grabSearchKw.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+
+async function doSearch() {
+  const kw = grabSearchKw.value.trim();
+  if (!kw) return;
+  grabSearchResults.classList.add('show');
+  grabSearchResults.innerHTML = '<div class="gshint">' + esc(t('webSearching')) + '</div>';
+  try {
+    const r = await fetch('/search?q=' + encodeURIComponent(kw));
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || '');
+    const hits = j.results || [];
+    if (!hits.length) {
+      grabSearchResults.innerHTML = '<div class="gshint">' + esc(t('webSearchEmpty')) + '</div>';
+      return;
+    }
+    grabSearchResults.innerHTML = '<div class="gshint">' + esc(t('webPick')) + ' (' + hits.length + ')</div>'
+      + hits.map((h, i) => {
+          const au = h.author ? ' · ' + esc(h.author) : '';
+          return '<div class="gsitem" data-i="' + i + '"><span class="gst">' + esc(h.title) + au + '</span>'
+            + '<span class="gsm">' + esc(h.source) + '</span><span class="gsgo">📥</span></div>';
+        }).join('');
+    grabSearchResults.querySelectorAll('.gsitem').forEach(el => {
+      el.addEventListener('click', () => {
+        const h = hits[+el.dataset.i];
+        if (!h) return;
+        grabUrl.value = h.url;
+        grabUrl.focus();
+        startGrab(false);
+      });
+    });
+  } catch (e) {
+    grabSearchResults.innerHTML = '<div class="gshint">❌ ' + esc(t('webSearchFail')) + ': ' + esc(e.message) + '</div>';
+  }
+}
+
 grabCancelBtn.addEventListener('click', async () => {
   if (!grabJobId) return;
   grabCancelBtn.disabled = true;

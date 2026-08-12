@@ -4,6 +4,10 @@
   "home": "http://www.88biquge.com",
   "url_re": "88biquge\\.com",
   "encoding": "utf-8",
+  "search": {
+    "url": "http://www.88biquge.com/search/?searchkey={kw}",
+    "result_re": "/book/\\d+_\\d+/"
+  },
   "toc": {
     "link_re": "第\\s*[0-9零一二三四五六七八九十百千两万]+\\s*[章节回卷]",
     "dedupe": "keep_last",
