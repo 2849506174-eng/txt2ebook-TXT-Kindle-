@@ -3891,10 +3891,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   /* ================= Reader ================= */
   .reader {
-    position:fixed; top:0; right:0; bottom:0; z-index:200; display:none;
-    width:min(580px, 94vw); background:var(--bg); color:var(--fg);
-    flex-direction:column; border-left:1px solid var(--border);
-    box-shadow:-10px 0 34px rgba(0,0,0,.4);
+    position:fixed; left:0; top:0; bottom:0; z-index:200; display:none;
+    width:440px; background:var(--bg); color:var(--fg); flex-direction:column;
+    border-right:1px solid var(--border);
+    box-shadow:8px 0 30px rgba(0,0,0,.35);
   }
   .reader.show { display:flex; }
   body.pure .reader { background:var(--bg); }
@@ -3938,7 +3938,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .rstatus.ok { color:var(--ok); }
   .rcontent {
     flex:1; overflow-y:auto; padding:26px 22px 60px;
-    font-size:18px; line-height:1.9;
+    font-size:18px; line-height:1.9; max-width:900px; width:100%;
+    margin:0 auto; box-sizing:border-box;
   }
   .rcontent p { margin:0 0 1em; word-break:break-word; }
   .rcontent .rhead {
@@ -3950,7 +3951,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   body:has(.reader.show) .themes { position:fixed; top:64px; right:20px; z-index:300; }
   body.pure .rcontent { max-width:860px; margin:0 auto; font-size:20px; padding-top:38px; }
   @media (max-width:760px) {
-    .reader { width:100vw; border-left:none; }
+    .reader { width:100vw; border-right:none; box-shadow:none; }
     .rcontent { padding:18px 14px 50px; }
     .rtitle { max-width:30vw; }
   }
@@ -5792,6 +5793,15 @@ function openReader() {
   rBookmark.classList.remove('on');
   rbmlist.style.display = 'none';
   renderRecent();
+  // cover the left toolbar: match its width so the right side (conversion
+  // panel / progress) stays visible; full screen on narrow screens
+  if (window.innerWidth > 760) {
+    const w = Math.min(Math.max(colLeft.offsetWidth || 440, 300),
+                       window.innerWidth - 60);
+    reader.style.width = w + 'px';
+  } else {
+    reader.style.width = '';
+  }
   reader.classList.add('show');
   ropen.style.display = 'flex';
   rtoolbar.style.display = 'flex';
