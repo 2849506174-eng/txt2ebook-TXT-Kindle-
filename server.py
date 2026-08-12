@@ -2268,6 +2268,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_read_bookmark_remove()
         elif self.path == "/read/delete":
             self.handle_read_delete()
+        elif self.path == "/read/clear_recent":
+            self.handle_read_clear_recent()
         else:
             self._send(404, "Not found")
 
@@ -2810,6 +2812,19 @@ class Handler(BaseHTTPRequestHandler):
             state = _load_read_state()
             state.pop(book_id, None)
             _save_read_state(state)
+        self._json(200, {"ok": True})
+
+    def handle_read_clear_recent(self):
+        """Clear all reading history and the whole local library."""
+        shutil.rmtree(READ_LIB, ignore_errors=True)
+        READ_LIB.mkdir(parents=True, exist_ok=True)
+        try:
+            READ_STATE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        with JOBS_LOCK:
+            for sid in [s for s, v in list(READ_SESSIONS.items())]:
+                READ_SESSIONS.pop(sid, None)
         self._json(200, {"ok": True})
 
     def _read_json_body(self):
@@ -3897,12 +3912,19 @@ INDEX_HTML = r"""<!DOCTYPE html>
     white-space:pre-wrap; word-break:break-all;
   }
   .grabLog.show { display:block; }
-  .rurlrow { display:flex; gap:8px; margin:12px 0; }
+  .rurlrow { display:flex; gap:8px; margin:12px 0; align-items:center; }
+  .rurllabel { font-size:12px; color:var(--muted); white-space:nowrap; }
   .rurlrow input {
     flex:1; min-width:0; padding:8px 10px; border-radius:9px;
     border:1px solid var(--border); background:var(--card); color:var(--fg); font-size:13px;
   }
   .rurlrow input:focus { outline:none; border-color:var(--accent); }
+  .rrecenthead { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .rclear {
+    background:none; border:1px solid var(--border); color:var(--muted);
+    border-radius:8px; font-size:11px; padding:2px 10px; cursor:pointer;
+  }
+  .rclear:hover { color:var(--err); border-color:var(--err); }
 </style>
 </head>
 <body>
@@ -4157,11 +4179,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <button class="btn" id="rLocal" data-i18n="rLocalBtn"></button>
       <input type="file" id="rFile" accept=".txt,.zip" hidden>
       <div class="rurlrow">
+        <span class="rurllabel" data-i18n="rUrlLabel"></span>
         <input type="url" id="rUrl" placeholder="" autocomplete="off" spellcheck="false">
         <button class="btn" id="rUrlGo" data-i18n="rUrlGoBtn"></button>
       </div>
       <div class="rrecent">
-        <div class="rrecenthead" data-i18n="rRecent"></div>
+        <div class="rrecenthead"><span data-i18n="rRecent"></span><button class="rclear" id="rClearRecent" data-i18n="rClearRecent"></button></div>
         <div id="rRecentList"></div>
       </div>
       <div class="rstatus" id="rStatus"></div>
@@ -4276,7 +4299,7 @@ const I18N = {
     webModeAuto: '自动', webModeChapter: '章节页', webModeToc: '目录页',
     webSourceAuto: '自动识别书源', webGo: '抓取', webCancel: '取消',
     webNoUrl: '请先输入网址', webStart: '开始抓取...', webRead: '阅读',
-    webConvert: '转电子书', webDone: '抓取完成', webAds: '清理广告',
+    webConvert: '转电子书', webDone: '抓取完成', webAds: '清理广告', rUrlLabel: '网址', rClearRecent: '清空',
   },
   en: {
     tag: 'Local · files never leave your PC · MOBI / AZW / AZW3 / EPUB / KFX',
@@ -4308,7 +4331,7 @@ const I18N = {
     webModeAuto: 'Auto', webModeChapter: 'Chapter', webModeToc: 'TOC',
     webSourceAuto: 'Auto-detect source', webGo: 'Fetch', webCancel: 'Cancel',
     webNoUrl: 'Enter a URL first', webStart: 'Fetching...', webRead: 'Read',
-    webConvert: 'Convert', webDone: 'Fetched', webAds: 'Clean ads',
+    webConvert: 'Convert', webDone: 'Fetched', webAds: 'Clean ads', rUrlLabel: 'URL', rClearRecent: 'Clear',
   },
 };
 let lang = 'zh';
@@ -5607,6 +5630,7 @@ const rBookmark = document.getElementById('rBookmark');
 const rBookmarks = document.getElementById('rBookmarks');
 const rbmlist = document.getElementById('rbmlist');
 const rRecentList = document.getElementById('rRecentList');
+const rClearRecent = document.getElementById('rClearRecent');
 try { state.font = Math.min(30, Math.max(13, parseInt(localStorage.getItem('txt2ebook_font') || '18', 10) || 18)); } catch (e) {}
 let pureTimer = null;
 
@@ -5831,6 +5855,15 @@ rRecentList.addEventListener('click', async (e) => {
     rSetStatus('❌ ' + err.message, false);
   }
 });
+rClearRecent.addEventListener('click', async () => {
+  if (!confirm(lang === 'zh' ? '清空全部阅读记录?本地书库中的书也会一并删除。' : 'Clear all reading history? Books in the local library will also be deleted.')) return;
+  try {
+    await fetch('/read/clear_recent', { method: 'POST' });
+  } catch (e) {}
+  renderRecent();
+  if (state.sid) closeReader();
+});
+
 rLocal.addEventListener('click', () => rFile.click());
 rFile.addEventListener('change', async () => {
   const f = rFile.files[0];
