@@ -1936,6 +1936,7 @@ def run_grab(job_id, url, source=None, mode="auto", clean_ads=True,
             if _is_cancelled(job_id):
                 _finish_job(job_id, status="cancelled", message="已取消")
                 return
+    set_job(job_id, status="running")
     try:
         try:
             _run_grab_body(job_id, url, source, mode, clean_ads, render,
