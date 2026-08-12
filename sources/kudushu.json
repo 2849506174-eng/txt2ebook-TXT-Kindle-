@@ -1,0 +1,11 @@
+{
+  "id": "kudushu",
+  "name": "m.kudushu.org",
+  "home": "https://m.kudushu.org",
+  "encoding": "utf-8",
+  "toc": {
+    "link_re": "(?:第\\s*[0-9零一二三四五六七八九十百千两万]+\\s*[章节回卷]|Chapter\\s+[0-9]+|(?:楔子|序章|序言|序幕|引子|前言|后记|番外|尾声|终章))",
+    "dedupe": "keep_last"
+  },
+  "url_re": "m\\.kudushu\\.org"
+}

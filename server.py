@@ -692,6 +692,9 @@ _AD_LINE_RE = re.compile(
     r"|.*更多内容加载中.*"
     r"|.*本站只支持手机浏览器访问.*"
     r"|(?:上?—?页|下?—?页|上一页|下一页|目录|返回书页|章节目录|上?—?章|下?—?章|上一章|下一章|加入书签|本章未完[，,]?请(?:点击)?下一页继续阅读)"
+    r"|(?:上?—?章|下?—?章|上一章|下一章|目录|书架|排行榜|返回|首页){2,}"
+    r"|^(?:首页|返回|我的|排行榜|书架|设置|搜索|加入书签|书签)$"
+    r"|^[\u4e00-\u9fff·]{2,12}\s*>\s*[\u4e00-\u9fff·]{2,12}.*$"
     r")\s*$",
     re.IGNORECASE,
 )
@@ -1378,8 +1381,9 @@ def _write_library_book(title, author, text, source_url):
 
 
 def _grab_single_chapter(job_id, url, html_text, final_url, source, enc,
-                         clean_ads, _log):
+                         clean_ads, _log, render="auto"):
     """A single chapter page -> one book. Returns dict or raises GrabError."""
+    use_render = render == "on"
     title, content = _extract_chapter(html_text, source, final_url)
     if content is None or len(content.strip()) < 50 \
             or _looks_obfuscated(content):
@@ -1404,8 +1408,9 @@ def _grab_single_chapter(job_id, url, html_text, final_url, source, enc,
                 break
             seen.add(nxt)
             try:
-                raw2, _ = _http_fetch(nxt, job_id, referer=cur_url)
-                html2 = decode_web_bytes(raw2, enc)
+                html2, _f, _m = _fetch_html(nxt, job_id, source,
+                                            prefer_render=use_render,
+                                            referer=cur_url)
             except GrabError:
                 break
             _t, part = _extract_chapter(html2, source, nxt)
@@ -1428,13 +1433,14 @@ def _grab_single_chapter(job_id, url, html_text, final_url, source, enc,
                 book_title = crumb.split(">")[0].strip() or book_title
     # prepend the chapter heading so chapter detection / TOC works
     heading = (title or "").strip()
+    content = content.strip()
     if heading and not _GRAB_CH_RE.search(content.split("\n", 1)[0]):
         content = heading + "\n" + content
     return {"title": book_title, "text": content, "chapters": 1,
             "chapter_titles": [title or book_title]}
 
 
-def _fetch_chapter_all(job_id, ch_url, html_c, source, enc):
+def _fetch_chapter_all(job_id, ch_url, html_c, source, enc, use_render=False):
     """Extract a chapter and iteratively follow ALL of its pages
     (xxx_2.html, xxx_3.html ...). Returns (heading, full_body)."""
     heading, body = _extract_chapter(html_c, source, ch_url)
@@ -1456,8 +1462,9 @@ def _fetch_chapter_all(job_id, ch_url, html_c, source, enc):
             break
         seen.add(nxt)
         try:
-            raw_p, _ = _http_fetch(nxt, job_id, referer=current_url)
-            html_p = decode_web_bytes(raw_p, enc)
+            html_p, _f, _m = _fetch_html(nxt, job_id, source,
+                                         prefer_render=use_render,
+                                         referer=current_url)
         except GrabError:
             break
         _t, part = _extract_chapter(html_p, source, nxt)
@@ -1469,8 +1476,9 @@ def _fetch_chapter_all(job_id, ch_url, html_c, source, enc):
 
 
 def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
-                     clean_ads, max_chapters, _log):
+                     clean_ads, max_chapters, _log, render="auto"):
     """A TOC page -> every chapter fetched and merged. Returns dict."""
+    use_render = render == "on"
     toc_cfg = (source or {}).get("toc") or {}
     link_re = None
     try:
@@ -1490,8 +1498,9 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
             continue
         visited.add(pu)
         try:
-            raw_p, _ = _http_fetch(pu, job_id, referer=final_url)
-            html_p = decode_web_bytes(raw_p, enc)
+            html_p, _f2, _m2 = _fetch_html(pu, job_id, source,
+                                            prefer_render=use_render,
+                                            referer=final_url)
         except GrabError:
             continue
         chapters += _extract_chapter_links(html_p, pu, link_re)
@@ -1514,6 +1523,7 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
     skipped = []
     ads_total = 0
     total = len(chapters)
+    _log_rendered = False
     set_job(job_id, total_parts=total, done_parts=0, progress=10,
             message=f"目录 {total} 章,开始逐章抓取...")
     for i, (ch_title, ch_url) in enumerate(chapters, 1):
@@ -1522,10 +1532,28 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
         body = None
         heading = None
         try:
-            raw_c, _ = _http_fetch(ch_url, job_id, referer=final_url)
-            html_c = decode_web_bytes(raw_c, enc)
+            html_c, _f, _m = _fetch_html(ch_url, job_id, source,
+                                         prefer_render=use_render,
+                                         referer=final_url)
             heading, body = _fetch_chapter_all(job_id, ch_url, html_c,
-                                               source, enc)
+                                               source, enc,
+                                               use_render=use_render)
+            # static page may be a JS shell: retry with the browser renderer
+            if (body is None or len(body.strip()) < 50) and not use_render:
+                try:
+                    html_r, _f2, _m2 = _fetch_html(
+                        ch_url, job_id, source, prefer_render=True,
+                        referer=final_url)
+                    heading2, body2 = _fetch_chapter_all(
+                        job_id, ch_url, html_r, source, enc, use_render=True)
+                    if body2 and len(body2.strip()) >= 50:
+                        heading, body = heading2, body2
+                        use_render = True
+                        if not _log_rendered:
+                            _log("检测到章节为 JS 动态加载,已启用浏览器渲染")
+                            _log_rendered = True
+                except GrabError:
+                    pass
             if body is None or len(body.strip()) < 50:
                 skipped.append((ch_title, "空内容/图片章节"))
                 body = None
@@ -1542,7 +1570,17 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
             h = (heading or ch_title).strip()
             h = re.sub(r"[（(]\s*第?\s*\d+\s*/\s*\d+\s*页?\s*[)）]\s*$",
                        "", h).strip()
-            parts.append(h + "\n" + body.strip())
+            b = body.strip()
+            # drop a duplicate heading at the top of the body (rendered pages
+            # often repeat the h1 inside the content container)
+            if b.startswith(h + "\n"):
+                b = b[len(h):].lstrip("\n")
+            elif b == h:
+                b = ""
+            # strip nav tokens glued to the first line (上一章目录下一章 …)
+            b = re.sub(r"^(?:上?—?章|下?—?章|上一章|下一章|目录|书架|排行榜|返回|首页){2,}\s*",
+                       "", b)
+            parts.append(h + "\n" + b)
         pct = 10 + int(i / total * 80)
         set_job(job_id, done_parts=i, progress=pct,
                 message=f"正在抓取 {i}/{total} 章: {ch_title[:22]}")
@@ -1561,16 +1599,186 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
             "ads_removed": ads_total, "chapter_titles": [p.split("\n", 1)[0] for p in parts]}
 
 
-def _run_grab_body(job_id, url, source, mode, clean_ads, title_override,
-                   author_override, max_chapters, _log):
-    raw, final_url = _http_fetch(url, job_id)
+# ===== optional headless-browser rendering (Playwright) =====
+# Static fetching can't see JS-loaded content. When enabled we drive a real
+# headless browser (system Chrome/Edge via Playwright, or Playwright's own
+# Chromium if installed) so JS-rendered pages still work. Optional:
+#   pip install playwright
+#   python -m playwright install chromium   (or just have Chrome/Edge)
+
+RENDER_TIMEOUT = 20000
+_RENDER_LOCK = threading.Lock()
+_render_worker = None
+_render_queue = None
+_render_ready = None   # None=untried, False=missing deps, True=ok
+_render_browser = None
+
+
+def _find_chrome():
+    for c in (r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+              r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+              r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+              r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"):
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def _render_available():
+    """True when Playwright + a browser binary are usable."""
+    global _render_ready
+    if _render_ready is None:
+        try:
+            import playwright.sync_api  # noqa: F401
+            _render_ready = _find_chrome() is not None or bool(
+                (Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright").exists())
+        except Exception:
+            _render_ready = False
+    return _render_ready
+
+
+def _ensure_render_worker():
+    """Start the dedicated render thread (Playwright sync API is bound to
+    the thread that started it, so all rendering goes through one thread)."""
+    global _render_worker, _render_queue
+    if _render_worker is not None:
+        return
+    import queue
+    _render_queue = queue.Queue()
+
+    def _worker():
+        global _render_browser
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            kwargs = {}
+            exe = _find_chrome()
+            if exe:
+                kwargs["executable_path"] = exe
+            _render_browser = p.chromium.launch(
+                headless=True, args=["--no-sandbox", "--disable-gpu"],
+                **kwargs)
+            while True:
+                item = _render_queue.get()
+                if item is None:
+                    break
+                url, sel, holder = item
+                try:
+                    page = _render_browser.new_page(user_agent=GRAB_UA,
+                                                    locale="zh-CN")
+                    try:
+                        page.set_default_timeout(RENDER_TIMEOUT)
+                        page.goto(url, wait_until="domcontentloaded",
+                                  timeout=RENDER_TIMEOUT)
+                        # JS-injected content needs a moment; wait a fixed
+                        # window first, then poll until the text length is
+                        # substantial AND stable (so we never grab a skeleton)
+                        if sel:
+                            try:
+                                page.wait_for_selector(sel, timeout=12000)
+                            except Exception:
+                                pass
+                        time.sleep(3.5)
+                        last_len = -1
+                        stable = 0
+                        deadline = time.time() + 15
+                        while time.time() < deadline:
+                            try:
+                                ln = page.evaluate(
+                                    "document.body ? document.body.innerText.length : 0")
+                            except Exception:
+                                ln = 0
+                            if ln == last_len:
+                                stable += 1
+                            else:
+                                stable = 0
+                                last_len = ln
+                            if stable >= 3 and ln > 800:
+                                break
+                            time.sleep(0.5)
+                        holder["html"] = page.content()
+                    finally:
+                        page.close()
+                except Exception as e:
+                    holder["error"] = str(e)
+                _render_queue.task_done()
+
+    _render_worker = threading.Thread(target=_worker, daemon=True)
+    _render_worker.start()
+
+
+def _render_page(url, wait_selector=None, timeout=RENDER_TIMEOUT + 8000):
+    """Render a page in headless Chromium and return its HTML."""
+    if not _render_available():
+        raise GrabError("未安装浏览器渲染组件(需要 pip install playwright;\n"
+                        "且系统装有 Chrome/Edge,或运行 playwright install chromium)")
+    _ensure_render_worker()
+    holder = {}
+    _render_queue.put((url, wait_selector, holder))
+    end = time.time() + timeout
+    while time.time() < end:
+        if "html" in holder or "error" in holder:
+            break
+        time.sleep(0.2)
+    if "html" in holder:
+        return holder["html"]
+    if "error" in holder:
+        raise GrabError(f"浏览器渲染失败: {holder['error']}")
+    raise GrabError("浏览器渲染超时")
+
+
+def _looks_js_loaded(html_text):
+    """Heuristic: page looks like a JS-only shell."""
+    s = html_text.lower()
+    if "enable javascript to run this app" in s:
+        return True
+    if "加载中" in html_text and len(html_text) < 4000:
+        return True
+    if len(html_text) < 2000:
+        return True
+    return False
+
+
+def _fetch_html(url, job_id=None, source=None, prefer_render=False,
+                render_fallback=True, referer=None):
+    """Fetch a page: plain HTTP first; when it looks JS-loaded (or
+    prefer_render), render it in headless Chromium. Returns (html, mode)
+    where mode is 'static' or 'render'."""
+    enc = (source or {}).get("encoding") or None
+    try:
+        raw, final = _http_fetch(url, job_id, referer=referer)
+        html = decode_web_bytes(raw, enc)
+    except GrabError:
+        html = None
+        final = url
+    if html is not None and not _looks_js_loaded(html) and not prefer_render:
+        return html, final, "static"
+    # static path failed or looks JS-loaded: try rendering
+    if render_fallback:
+        try:
+            rhtml = _render_page(url)
+            rtext = decode_web_bytes(rhtml.encode("utf-8", "replace"), enc)
+            return rtext, final, "render"
+        except GrabError:
+            pass
+    if html is not None:
+        return html, final, "static"
+    raise GrabError(f"无法访问页面: {url}")
+
+
+def _run_grab_body(job_id, url, source, mode, clean_ads, render,
+                   title_override, author_override, max_chapters, _log):
+    html_text, final_url, fetch_mode = _fetch_html(url, job_id, source,
+                                                   prefer_render=(render == "on"))
     if source is None:
         source = _match_source(final_url) or _match_source(url)
     enc = (source or {}).get("encoding") or None
-    html_text = decode_web_bytes(raw, enc)
+    if fetch_mode == "render":
+        # page was JS-loaded; keep rendering for the rest of this job
+        render = "on"
+        _log("该页面为 JS 动态加载,已启用浏览器渲染模式")
     set_job(job_id, progress=5, message="已下载页面,正在解析...")
-    _log(f"已下载 {len(raw) // 1024} KB · 编码 "
-         f"{enc or _sniff_charset(raw) or '自动'} · 书源 {source.get('name') if source else '通用提取'}")
+    _log(f"已下载页面 · 方式 {'浏览器渲染' if fetch_mode == 'render' else '直连'} · "
+         f"书源 {source.get('name') if source else '通用提取'}")
 
     links = _extract_chapter_links(html_text, final_url)
     page_mode = mode
@@ -1589,10 +1797,10 @@ def _run_grab_body(job_id, url, source, mode, clean_ads, title_override,
 
     if page_mode == "chapter":
         res = _grab_single_chapter(job_id, url, html_text, final_url,
-                                   source, enc, clean_ads, _log)
+                                   source, enc, clean_ads, _log, render)
     else:
         res = _grab_whole_book(job_id, url, html_text, final_url,
-                               source, enc, clean_ads, max_chapters, _log)
+                               source, enc, clean_ads, max_chapters, _log, render)
 
     title = (title_override or res.get("title") or "未命名").strip()
     author = (author_override or res.get("author") or "").strip()
@@ -1633,9 +1841,12 @@ def _run_grab_body(job_id, url, source, mode, clean_ads, title_override,
 
 
 def run_grab(job_id, url, source=None, mode="auto", clean_ads=True,
-             title_override=None, author_override=None, max_chapters=None):
+             render="auto", title_override=None, author_override=None,
+             max_chapters=None):
     """Worker thread for /grab: fetch a chapter page or a whole book and
-    store a clean TXT into the library + job dir. kind='grab'."""
+    store a clean TXT into the library + job dir. kind='grab'.
+    ``render``: auto = static first, fall back to headless browser when a
+    page looks JS-loaded; off = static only; on = always render."""
     log = []
 
     def _log(msg):
@@ -1650,7 +1861,7 @@ def run_grab(job_id, url, source=None, mode="auto", clean_ads=True,
                 return
     try:
         try:
-            _run_grab_body(job_id, url, source, mode, clean_ads,
+            _run_grab_body(job_id, url, source, mode, clean_ads, render,
                            title_override, author_override, max_chapters, _log)
         except GrabError as e:
             if str(e) == "cancelled":
@@ -3263,6 +3474,9 @@ class Handler(BaseHTTPRequestHandler):
         clean_ads = data.get("clean_ads", True)
         if isinstance(clean_ads, str):
             clean_ads = clean_ads.strip().lower() not in ("0", "false", "off", "no", "")
+        render = (data.get("render") or "auto").strip().lower()
+        if render not in ("auto", "off", "on"):
+            render = "auto"
         max_chapters = 0
         try:
             max_chapters = int(data.get("max_chapters") or 0)
@@ -3282,6 +3496,7 @@ class Handler(BaseHTTPRequestHandler):
         t = threading.Thread(target=run_grab, args=(job_id, url),
                              kwargs={"source": source, "mode": mode,
                                      "clean_ads": clean_ads,
+                                     "render": render,
                                      "title_override": (data.get("title") or "").strip(),
                                      "author_override": (data.get("author") or "").strip(),
                                      "max_chapters": cap},
@@ -4399,6 +4614,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <option value="chapter" data-i18n="webModeChapter"></option>
             <option value="toc" data-i18n="webModeToc"></option>
           </select>
+          <label data-tip="tipRender"><input type="checkbox" id="grabRender"> <span data-i18n="webRender"></span></label>
           <label><input type="checkbox" id="grabAds" checked> <span data-i18n="webAds"></span></label>
         </div>
         <div class="webrow">
@@ -4512,6 +4728,7 @@ const grabUrl = document.getElementById('grabUrl');
 const grabSource = document.getElementById('grabSource');
 const grabMode = document.getElementById('grabMode');
 const grabAds = document.getElementById('grabAds');
+const grabRender = document.getElementById('grabRender');
 const grabBtn = document.getElementById('grabBtn');
 const grabCancelBtn = document.getElementById('grabCancelBtn');
 const grabStatus = document.getElementById('grabStatus');
@@ -4561,6 +4778,7 @@ const I18N = {
     webSourceAuto: '自动识别书源', webGo: '抓取', webCancel: '取消',
     webNoUrl: '请先输入网址', webStart: '开始抓取...', webRead: '阅读',
     webConvert: '转电子书', webDone: '抓取完成', webAds: '清理广告', rUrlLabel: '网址', rClearRecent: '清空',
+    webRender: '浏览器渲染', tipRender: 'JS 动态加载的站请勾选:用无头浏览器渲染后抓取(更慢但能抓动态页;不勾选时检测到 JS 页会自动启用)',
     srcMgr: '书源管理', srcAdd: '➕ 添加书源', srcName: '书源名称', srcHome: '站点主页', srcEnc: '编码',
     srcCont: '正文容器', srcRe: '目录章节正则', srcAdv: '高级:直接编辑 JSON',
     srcSave: '保存书源', srcDel: '删除', srcEmpty: '暂无自定义书源',
@@ -4608,6 +4826,7 @@ const I18N = {
     webSourceAuto: 'Auto-detect source', webGo: 'Fetch', webCancel: 'Cancel',
     webNoUrl: 'Enter a URL first', webStart: 'Fetching...', webRead: 'Read',
     webConvert: 'Convert', webDone: 'Fetched', webAds: 'Clean ads', rUrlLabel: 'URL', rClearRecent: 'Clear',
+    webRender: 'Browser render', tipRender: 'For JS-loaded sites: render with headless browser before scraping (slower, but fetches dynamic pages; auto-enables when a JS-only page is detected)',
     srcMgr: 'Source manager', srcAdd: '➕ Add source', srcName: 'Name', srcHome: 'Site home', srcEnc: 'Encoding',
     srcCont: 'Content container', srcRe: 'TOC chapter regex', srcAdv: 'Advanced: edit JSON',
     srcSave: 'Save source', srcDel: 'Delete', srcEmpty: 'no custom sources yet',
@@ -5683,7 +5902,8 @@ async function startGrab() {
   grabCancelBtn.style.display = 'inline-block';
   const body = { url: url, mode: grabMode.value,
                  source_id: grabSource.value,
-                 clean_ads: grabAds.checked ? '1' : '0' };
+                 clean_ads: grabAds.checked ? '1' : '0',
+                 render: grabRender.checked ? 'on' : 'auto' };
   setProgress(0, t('webStart'));
   try {
     const r = await fetch('/grab', {
