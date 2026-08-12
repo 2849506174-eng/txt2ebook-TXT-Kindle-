@@ -693,7 +693,7 @@ _AD_LINE_RE = re.compile(
     r"|.*本站只支持手机浏览器访问.*"
     r"|(?:上?—?页|下?—?页|上一页|下一页|目录|返回书页|章节目录|上?—?章|下?—?章|上一章|下一章|加入书签|本章未完[，,]?请(?:点击)?下一页继续阅读)"
     r"|(?:上?—?章|下?—?章|上一章|下一章|目录|书架|排行榜|返回|首页){2,}"
-    r"|^(?:首页|返回|我的|排行榜|书架|设置|搜索|加入书签|书签)$"
+    r"|^(?:首页|返回|我的|排行榜|书架|设置|搜索|加入书签|书签|关灯|护眼|夜间模式|推荐本书|章节列表|TXT下载|字[:：]?|大|中|小|←|→|上一章|下一章|目录|[\u4e00-\u9fff]{2,4}小说)$"
     r"|^[\u4e00-\u9fff·]{2,12}\s*>\s*[\u4e00-\u9fff·]{2,12}.*$"
     r")\s*$",
     re.IGNORECASE,
@@ -711,6 +711,7 @@ _AD_INLINE_RE = re.compile(
     r"|看后求收藏[（(][^）)]*[）)]"
     r"|(?:最新|新)网址[：:]\S*"
     r"|[（(]\s*第?\s*\d+\s*/\s*\d+\s*页?\s*[)）]"
+    r"|[（(]本章未完[，,]?请(?:点击)?下一页继续阅读[）)]"
 )
 
 
@@ -1241,8 +1242,11 @@ def _chapter_pages(base_url, html_text, use_text_fallback=True):
     if ext:
         page_re = re.compile(r"^" + re.escape(stem_noext) + r"[-_](\d+)\."
                              + re.escape(ext.lstrip(".")) + r"$")
+        path_re = re.compile(r"^(.*/)?" + re.escape(stem_noext) + r"/(\d+)\."
+                             + re.escape(ext.lstrip(".")) + r"$")
     else:
         page_re = re.compile(r"^" + re.escape(stem_noext) + r"[-_](\d+)/?$")
+        path_re = None
     text_hits = []
     for m in re.finditer(
             r'<a[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>([^<]{1,20})</a>',
@@ -1254,6 +1258,13 @@ def _chapter_pages(base_url, html_text, use_text_fallback=True):
         mm = page_re.match(name)
         if mm:
             pages.append((int(mm.group(1)), urljoin(base_url, href)))
+            continue
+        # path-style paging: .../54852657/2.html
+        if path_re:
+            pm = path_re.match(href)
+            if pm:
+                pages.append((int(pm.group(2)), urljoin(base_url, href)))
+                continue
         elif use_text_fallback and tx in ("下一页", "下页", "下—页", "第2页") \
                 and not href.lower().startswith(("javascript:", "#")):
             text_hits.append(urljoin(base_url, href))
@@ -1314,6 +1325,25 @@ def _link_prefixes(links):
     return pref
 
 
+# Common content containers tried when no source config matched (generic
+# mode): the first one with substantial CJK text wins.
+_COMMON_CONTENT_SELECTORS = [
+    {"tag": "div", "id": "content"},
+    {"tag": "div", "class": "novelcontent"},
+    {"tag": "div", "id": "chaptercontent"},
+    {"tag": "div", "class": "con"},
+    {"tag": "div", "class": "content"},
+    {"tag": "div", "class": "nr1"},
+    {"tag": "div", "class": "nr"},
+    {"tag": "div", "class": "read-content"},
+    {"tag": "div", "class": "txt"},
+    {"tag": "div", "id": "booktxt"},
+    {"tag": "div", "id": "BookText"},
+    {"tag": "div", "class": "article-content"},
+    {"tag": "article"},
+]
+
+
 def _extract_chapter(html_text, source, base_url):
     """Extract (chapter_title, content_text) from a chapter page."""
     title = None
@@ -1337,12 +1367,43 @@ def _extract_chapter(html_text, source, base_url):
             except Exception:
                 pass
             title = ex2.result()
+            if title and not _GRAB_CH_RE.search(title):
+                # the first h1 is often the site logo; look for a
+                # chapter-looking h1 anywhere on the page
+                for m in re.finditer(r"<h1[^>]*>(.*?)</h1>",
+                                     html_text, re.S | re.I):
+                    cand = _norm_line(re.sub(r"<[^>]+>", " ", m.group(1)))
+                    if _GRAB_CH_RE.search(cand):
+                        title = cand
+                        break
+    if content is None:
+        # no source config: try common content containers first, then the
+        # generic longest-text-block heuristic
+        for sel in _COMMON_CONTENT_SELECTORS:
+            try:
+                ex = _SelectorExtractor([sel])
+                ex.feed(html_text)
+                ex.close()
+                out = ex.result()
+            except Exception:
+                out = None
+            if out and len(out.strip()) > 100:
+                content = out
+                break
     if content is None:
         content = _extract_generic(html_text)
     if not title:
-        m = re.search(r"<h1[^>]*>(.*?)</h1>", html_text, re.S | re.I)
-        if m:
-            title = _norm_line(re.sub(r"<[^>]+>", " ", m.group(1)))
+        # prefer an h1 that looks like a chapter heading (the first h1 is
+        # often the site logo)
+        for m in re.finditer(r"<h1[^>]*>(.*?)</h1>", html_text, re.S | re.I):
+            cand = _norm_line(re.sub(r"<[^>]+>", " ", m.group(1)))
+            if _GRAB_CH_RE.search(cand):
+                title = cand
+                break
+        if not title:
+            m = re.search(r"<h1[^>]*>(.*?)</h1>", html_text, re.S | re.I)
+            if m:
+                title = _norm_line(re.sub(r"<[^>]+>", " ", m.group(1)))
     if not title:
         m = re.search(r"<title>([^<]*)</title>", html_text, re.S | re.I)
         if m:
@@ -1469,7 +1530,14 @@ def _fetch_chapter_all(job_id, ch_url, html_c, source, enc, use_render=False):
             break
         _t, part = _extract_chapter(html_p, source, nxt)
         if part and not _looks_obfuscated(part):
-            body = body.rstrip() + "\n\n" + part.strip()
+            part = part.strip()
+            # drop the repeated heading at the top of a paged part
+            first, _, rest = part.partition("\n")
+            first_norm = re.sub(r"[（(]\s*第?\s*\d+\s*/\s*\d+\s*页?\s*[)）]\s*$",
+                                "", _norm_line(first)).strip()
+            if _t and first_norm == _norm_line(_t):
+                part = rest.lstrip("\n")
+            body = body.rstrip() + "\n\n" + part
         current_url = nxt
         current_html = html_p
     return heading, body
@@ -1488,7 +1556,12 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
     chapters = _extract_chapter_links(html_text, final_url, link_re)
     # follow TOC pagination (sites that split the chapter list across pages)
     visited = {final_url}
-    pages_cfg = toc_cfg.get("pages") or {}
+    pages_cfg = toc_cfg.get("pages")
+    if not pages_cfg and source is None:
+        # generic mode (no source config): auto-follow 下一页/更多章节 links
+        pages_cfg = {"next_text_re": "下一页|下页|更多章节|更多",
+                     "max_pages": 30}
+    pages_cfg = pages_cfg or {}
     max_pages = int(pages_cfg.get("max_pages") or 0) or 20
     queue = _toc_pages(final_url, html_text, pages_cfg, visited)
     hops = 0
@@ -1573,8 +1646,9 @@ def _grab_whole_book(job_id, url, html_text, final_url, source, enc,
             b = body.strip()
             # drop a duplicate heading at the top of the body (rendered pages
             # often repeat the h1 inside the content container)
-            if b.startswith(h + "\n"):
-                b = b[len(h):].lstrip("\n")
+            first, _, rest = b.partition("\n")
+            if _norm_line(first) == h:
+                b = rest.lstrip("\n")
             elif b == h:
                 b = ""
             # strip nav tokens glued to the first line (上一章目录下一章 …)
@@ -3389,19 +3463,7 @@ class Handler(BaseHTTPRequestHandler):
         enc = _sniff_charset(raw)
         text = decode_web_bytes(raw, None)
         # find the best known content container by CJK length
-        common = [{"tag": "div", "class": "novelcontent"},
-                  {"tag": "div", "id": "chaptercontent"},
-                  {"tag": "div", "id": "content"},
-                  {"tag": "div", "class": "con"},
-                  {"tag": "div", "class": "content"},
-                  {"tag": "div", "class": "nr1"},
-                  {"tag": "div", "class": "nr"},
-                  {"tag": "div", "class": "read-content"},
-                  {"tag": "div", "class": "txt"},
-                  {"tag": "div", "id": "booktxt"},
-                  {"tag": "div", "id": "BookText"},
-                  {"tag": "div", "class": "article-content"},
-                  {"tag": "article"}]
+        common = _COMMON_CONTENT_SELECTORS
         best_sel, best_len = None, 0
         for sel in common:
             try:
