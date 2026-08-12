@@ -681,6 +681,7 @@ _AD_LINE_RE = re.compile(
     r"|(?:本站|网站)首发\S*"
     r"|首发\S*首发\S*"
     r"|本章未完[，,]?请(?:点击)?下一章继续阅读"
+    r"|.*本章未完.*(?:下一章|浏览器|请点击).*"
     r"|(?:书友群|QQ群)\S*"
     r"|喜欢\S*请(?:收藏|投推荐票)\S*"
     r"|随手收藏[，,]方便下次阅读"
@@ -688,6 +689,8 @@ _AD_LINE_RE = re.compile(
     r"|更多精彩小说请访问\S*"
     r"|.*看后求收藏.*"
     r"|.*(?:最新|新)网址[：:]\S*"
+    r"|.*更多内容加载中.*"
+    r"|.*本站只支持手机浏览器访问.*"
     r")\s*$",
     re.IGNORECASE,
 )
@@ -1016,7 +1019,12 @@ class _SelectorExtractor(HTMLParser):
             self.in_skip += 1
             return
         if self.depth:
-            self.depth += 1
+            # only nested <div>s participate in depth counting (they must be
+            # balanced in well-formed pages); <p>/<span>/... only flush. This
+            # keeps extraction from running past the container when paragraphs
+            # are unclosed or the page is sloppy.
+            if tag == "div":
+                self.depth += 1
             if tag in _BLOCK_TAGS:
                 self._flush()
             return
@@ -1039,6 +1047,10 @@ class _SelectorExtractor(HTMLParser):
             if self.depth == 0:
                 self._flush()
                 self._done = True
+        elif tag == "div":
+            # balance a nested div whose start tag we counted
+            if self.depth:
+                self.depth -= 1
         elif tag in _BLOCK_TAGS:
             self._flush()
 
@@ -1108,7 +1120,9 @@ def _clean_page_title(raw):
         # a part that looks like a chapter heading is not the book name
         kept = [p for p in kept if not _GRAB_CH_RE.search(p)] or kept
         if kept:
-            s = max(kept, key=len)
+            # prefer a part that is completely free of site branding
+            clean = [p for p in kept if not any(n in p for n in _SITE_NOISE)]
+            s = max(clean or kept, key=len)
     s = re.sub(r"(?:无弹窗|最新章节(?:列表)?|全文免费阅读|免费阅读|全文阅读|在线阅读|最新章节目录|"
                r"小说阅读网|txt下载|笔趣阁|5200|88笔趣阁|新笔趣阁|笔尖中文).*$", "", s)
     return s.strip(" _-|·（）()")
@@ -1218,8 +1232,9 @@ def _chapter_pages(base_url, html_text):
         href = m.group(1).strip()
         tx = _norm_line(m.group(2))
         name = href.rsplit("/", 1)[-1]
-        mm = re.match(r"^" + re.escape(stem_noext) + r"_(\d+)\."
-                      + re.escape(ext.lstrip(".")) + r"$", name)
+        # same chapter stem with a numeric suffix: xxx_2.html or xxx-2.html
+        mm = re.match(r"^" + re.escape(stem_noext)
+                      + r"[-_](\d+)\." + re.escape(ext.lstrip(".")) + r"$", name)
         if mm:
             pages.append((int(mm.group(1)), urljoin(base_url, href)))
         elif tx in ("下一页", "下页", "第2页") \
@@ -1269,12 +1284,14 @@ def _match_source(url):
 
 
 def _link_prefixes(links):
-    """Distinct URL path prefixes (first two segments) among chapter links.
-    A real book TOC keeps one prefix; a site homepage mixes many books."""
-    pref = set()
+    """Counter of directory prefixes among chapter links (path minus the
+    filename). A real book TOC keeps one dominant prefix; a site homepage
+    mixes many books (plus recommendation links matching chapter patterns)."""
+    pref = {}
     for _tx, u in links:
         parts = urlparse(u).path.strip("/").split("/")
-        pref.add("/".join(parts[:2]))
+        key = "/".join(parts[:-1]) if len(parts) > 1 else "/".join(parts)
+        pref[key] = pref.get(key, 0) + 1
     return pref
 
 
@@ -1312,9 +1329,12 @@ def _extract_chapter(html_text, source, base_url):
         if m:
             title = _clean_page_title(m.group(1))
     if title:
-        # strip page-number suffixes like (第1/2页)
+        # strip page-number suffixes like (第1/2页) and breadcrumbs like
+        # "捞尸人 > 第一章" (keep the last crumb = the chapter itself)
         title = re.sub(r"[（(]\s*第?\s*\d+\s*/\s*\d+\s*页?\s*[)）]\s*$",
                        "", title).strip()
+        if ">" in title:
+            title = title.split(">")[-1].strip()
     return title, content
 
 
@@ -1370,6 +1390,14 @@ def _grab_single_chapter(job_id, url, html_text, final_url, source, enc,
     m = re.search(r"<title>([^<]*)</title>", html_text, re.S | re.I)
     page_title = _clean_page_title(m.group(1)) if m else ""
     book_title = page_title or title or "未命名章节"
+    # short/placeholder titles (e.g. just the site name) fall back to the
+    # breadcrumb book name when the page has one (捞尸人 > 第一章)
+    if len(book_title) < 4 or book_title in ("章节页", "未命名章节"):
+        m1 = re.search(r"<h1[^>]*>(.*?)</h1>", html_text, re.S | re.I)
+        if m1:
+            crumb = _norm_line(re.sub(r"<[^>]+>", " ", m1.group(1)))
+            if ">" in crumb:
+                book_title = crumb.split(">")[0].strip() or book_title
     # prepend the chapter heading so chapter detection / TOC works
     heading = (title or "").strip()
     if heading and not _GRAB_CH_RE.search(content.split("\n", 1)[0]):
@@ -1484,11 +1512,14 @@ def _run_grab_body(job_id, url, source, mode, clean_ads, title_override,
     links = _extract_chapter_links(html_text, final_url)
     page_mode = mode
     if page_mode == "auto":
-        # many chapter links under one URL prefix = a book TOC; links spread
-        # over many prefixes = a homepage/recent list, treat as chapter page
-        if len(links) >= 5 and len(_link_prefixes(links)) <= 3:
-            page_mode = "toc"
-        else:
+        # many chapter links under one dominant URL prefix = a book TOC;
+        # links spread over many prefixes = homepage/recent list
+        if len(links) >= 5:
+            pref = _link_prefixes(links)
+            top, n = max(pref.items(), key=lambda kv: kv[1])
+            if n / len(links) >= 0.8:
+                page_mode = "toc"
+        if page_mode == "auto":
             page_mode = "chapter"
     _log(f"页面类型: {'目录页' if page_mode == 'toc' else '章节页'} · "
          f"识别到章节链接 {len(links)} 个")

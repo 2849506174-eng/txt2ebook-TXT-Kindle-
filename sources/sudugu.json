@@ -1,0 +1,16 @@
+{
+  "id": "sudugu",
+  "name": "速读谷 (UTF-8)",
+  "home": "https://www.sudugu.org",
+  "url_re": "sudugu\\.org",
+  "encoding": "utf-8",
+  "toc": {
+    "link_re": "第\\s*[0-9零一二三四五六七八九十百千两万]+\\s*[章节回卷]",
+    "dedupe": "keep_last"
+  },
+  "chapter": {
+    "title": [{"tag": "h1"}],
+    "content": [{"tag": "div", "class": "con"}],
+    "pagination": false
+  }
+}

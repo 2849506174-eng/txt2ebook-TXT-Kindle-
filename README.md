@@ -93,6 +93,7 @@ python server.py
 |------|------|------|
 | 笔趣阁5200 (biquge5200.cc) | GBK | 经典笔趣阁模板,静态页 |
 | 88笔趣阁 (88biquge.com) | UTF-8 | 目录分页 + 章节分页,自动跟随 |
+| 速读谷 (sudugu.org) | UTF-8 | 章节分页(连字符 -2.html)自动跟随 |
 
 ### 书源 JSON 格式(`sources/` 目录)
 
