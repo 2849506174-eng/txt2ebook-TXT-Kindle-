@@ -2413,7 +2413,7 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_read_chapter()
         elif self.path.startswith("/backgrounds/"):
             self.handle_background()
-        elif self.path.startswith("/guide/"):
+        elif self.path.startswith("/guide/") or self.path.startswith("/%E4%BD%BF%E7%94%A8%E6%95%99%E7%A8%8B/"):
             self.handle_guide()
         elif self.path.startswith("/progress/"):
             self.handle_progress()
@@ -3395,12 +3395,20 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True, "job_id": job_id})
 
     def handle_guide(self):
-        """Serve the guide/ folder (screenshots + tutorial page)."""
-        rel = self.path.split("?", 1)[0][len("/guide/"):] or "index.html"
+        """Serve the 使用教程/ folder (screenshots + tutorial page)."""
+        raw = self.path.split("?", 1)[0]
+        path = urllib.parse.unquote(raw)
+        if path.startswith("/guide/"):
+            # 旧地址兼容:跳转到中文路径
+            rel = path[len("/guide/"):] or "index.html"
+            self._send(302, b"", ctype="text/plain",
+                       extra={"Location": "/%E4%BD%BF%E7%94%A8%E6%95%99%E7%A8%8B/" + urllib.parse.quote(rel)})
+            return
+        rel = path[len("/使用教程/"):] or "index.html"
         if "/" in rel or ".." in rel or "\\" in rel:
             self._send(404, "Not found")
             return
-        p = BASE / "guide" / rel
+        p = BASE / "使用教程" / rel
         if not p.is_file():
             self._send(404, "Not found")
             return
