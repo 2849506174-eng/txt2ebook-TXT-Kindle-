@@ -691,6 +691,7 @@ _AD_LINE_RE = re.compile(
     r"|.*(?:最新|新)网址[：:]\S*"
     r"|.*更多内容加载中.*"
     r"|.*本站只支持手机浏览器访问.*"
+    r"|(?:上?—?页|下?—?页|上一页|下一页|目录|返回书页|章节目录|上?—?章|下?—?章|上一章|下一章|加入书签|本章未完[，,]?请(?:点击)?下一页继续阅读)"
     r")\s*$",
     re.IGNORECASE,
 )
@@ -705,6 +706,8 @@ _AD_INLINE_RE = re.compile(
     r"|最快更新[。！!]?"
     r"|无弹窗[，,]无广告[。！!]?"
     r"|看后求收藏[（(][^）)]*[）)]"
+    r"|(?:最新|新)网址[：:]\S*"
+    r"|[（(]\s*第?\s*\d+\s*/\s*\d+\s*页?\s*[)）]"
 )
 
 
@@ -1224,26 +1227,31 @@ def _chapter_pages(base_url, html_text, use_text_fallback=True):
     no same-stem paging - iterative paging walks must disable it so the
     "next chapter" link is never mistaken for a page of this chapter."""
     pages = []
-    path = urlparse(base_url).path
+    path = urlparse(base_url).path.rstrip("/")
     stem = path.rsplit("/", 1)[-1]
     stem_noext, ext = os.path.splitext(stem)
-    # a paged URL (xxx-2.html / xxx_3.html) must still match sibling pages
+    # a paged URL (xxx-2.html / xxx_3.html / xxx_2/ ) must still match
+    # sibling pages; strip any numeric suffix from the stem
     stem_noext = re.sub(r"[-_]\d+$", "", stem_noext)
     if not stem_noext:
         return pages
+    if ext:
+        page_re = re.compile(r"^" + re.escape(stem_noext) + r"[-_](\d+)\."
+                             + re.escape(ext.lstrip(".")) + r"$")
+    else:
+        page_re = re.compile(r"^" + re.escape(stem_noext) + r"[-_](\d+)/?$")
     text_hits = []
     for m in re.finditer(
             r'<a[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>([^<]{1,20})</a>',
             html_text, re.I):
         href = m.group(1).strip()
         tx = _norm_line(m.group(2))
-        name = href.rsplit("/", 1)[-1]
-        # same chapter stem with a numeric suffix: xxx_2.html or xxx-2.html
-        mm = re.match(r"^" + re.escape(stem_noext)
-                      + r"[-_](\d+)\." + re.escape(ext.lstrip(".")) + r"$", name)
+        name = href.rstrip("/").rsplit("/", 1)[-1]
+        # same chapter stem with a numeric suffix: xxx_2.html / xxx-2.html
+        mm = page_re.match(name)
         if mm:
             pages.append((int(mm.group(1)), urljoin(base_url, href)))
-        elif use_text_fallback and tx in ("下一页", "下页", "第2页") \
+        elif use_text_fallback and tx in ("下一页", "下页", "下—页", "第2页") \
                 and not href.lower().startswith(("javascript:", "#")):
             text_hits.append(urljoin(base_url, href))
     if not pages:
@@ -2305,6 +2313,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_sources_save()
         elif self.path == "/sources/delete":
             self.handle_sources_delete()
+        elif self.path == "/sources/probe":
+            self.handle_sources_probe()
         elif self.path == "/grab":
             self.handle_grab()
         elif self.path == "/convert_lib":
@@ -3150,6 +3160,92 @@ class Handler(BaseHTTPRequestHandler):
             pass
         SOURCES.pop(sid, None)
         self._json(200, {"ok": True})
+
+    def handle_sources_probe(self):
+        """POST /sources/probe {url}: fetch a chapter page and auto-detect
+        the source settings (encoding, content container, chapter paging,
+        TOC paging) so adding a new source is one click."""
+        data = self._read_json_body()
+        url = (data.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            self._json(400, {"error": "请输入章节页 URL"})
+            return
+        try:
+            raw, final = _http_fetch(url)
+        except GrabError as e:
+            self._json(400, {"error": str(e)})
+            return
+        enc = _sniff_charset(raw)
+        text = decode_web_bytes(raw, None)
+        # find the best known content container by CJK length
+        common = [{"tag": "div", "class": "novelcontent"},
+                  {"tag": "div", "id": "chaptercontent"},
+                  {"tag": "div", "id": "content"},
+                  {"tag": "div", "class": "con"},
+                  {"tag": "div", "class": "content"},
+                  {"tag": "div", "class": "nr1"},
+                  {"tag": "div", "class": "nr"},
+                  {"tag": "div", "class": "read-content"},
+                  {"tag": "div", "class": "txt"},
+                  {"tag": "div", "id": "booktxt"},
+                  {"tag": "div", "id": "BookText"},
+                  {"tag": "div", "class": "article-content"},
+                  {"tag": "article"}]
+        best_sel, best_len = None, 0
+        for sel in common:
+            try:
+                ex = _SelectorExtractor([sel])
+                ex.feed(text)
+                ex.close()
+                out = ex.result() or ""
+                cjk = sum(1 for c in out if "\u4e00" <= c <= "\u9fff")
+                if cjk > best_len:
+                    best_sel, best_len = sel, cjk
+            except Exception:
+                continue
+        # chapter paging detection (number of pages incl. current)
+        pages = _chapter_pages(final, text)
+        n_pages = len(pages) + 1
+        # TOC paging: look for the 目录/书页 link and whether it has 下一页
+        toc_url = None
+        for m in re.finditer(r'<a[^>]*href="([^"]+)"[^>]*>([^<]{1,20})</a>', text):
+            tx = re.sub(r"<[^>]+>", " ", m.group(2))
+            tx = tx.replace("&nbsp;", " ").replace("\xa0", " ")
+            tx = re.sub(r"\s+", "", tx)
+            if tx in ("目录", "章节目录", "返回目录", "返回书页", "返回", "书页"):
+                toc_url = urljoin(final, m.group(1).strip())
+                break
+        toc_pages = {}
+        if toc_url:
+            try:
+                raw_t, _ = _http_fetch(toc_url)
+                text_t = decode_web_bytes(raw_t, None)
+                for m in re.finditer(r'<a[^>]*href="([^"]+)"[^>]*>([^<]{1,12})</a>', text_t):
+                    if re.search(r"下一页|下页|更多章节", m.group(2)):
+                        toc_pages = {"next_text_re": "下一页|下页|更多章节|更多",
+                                     "max_pages": 30}
+                        break
+            except GrabError:
+                pass
+        dom = urlparse(final).netloc
+        src = {"id": re.sub(r"[^A-Za-z0-9_-]", "_", dom.split(".")[-2] or dom)
+               if dom else "mysite",
+               "name": dom or "新书源",
+               "home": "https://" + dom if dom else "",
+               "encoding": enc or "utf-8"}
+        src["toc"] = {"link_re": str(_GRAB_CH_RE.pattern), "dedupe": "keep_last"}
+        if toc_pages:
+            src["toc"]["pages"] = toc_pages
+        if best_sel:
+            src["chapter"] = {"title": [{"tag": "h1"}],
+                              "content": [best_sel], "pagination": True}
+        self._json(200, {"ok": True, "suggest": src,
+                         "detected": {"encoding": enc or "auto",
+                                       "container": best_sel or None,
+                                       "cjk_chars": best_len,
+                                       "chapter_pages": n_pages,
+                                       "toc_url": toc_url,
+                                       "toc_paged": bool(toc_pages)}})
 
     def handle_grab(self):
         """Start a background grab job: a chapter page or a whole book from a
@@ -4315,6 +4411,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="srcmgr">
           <button class="btn tiny" id="srcMgrBtn" data-tip="tipSrcMgr">⚙️ <span data-i18n="srcMgr"></span></button>
           <div class="srcpanel" id="srcPanel" style="display:none">
+            <div class="srcrow">
+              <input type="url" id="srcProbeUrl" placeholder="">
+              <button class="btn" id="srcProbeBtn" data-tip="tipProbe">🪄 <span data-i18n="srcProbe"></span></button>
+            </div>
+            <div class="srcmsg" id="srcProbeMsg"></div>
             <div class="srclist" id="srcList"></div>
             <details class="srcadd">
               <summary data-i18n="srcAdd"></summary>
@@ -4464,6 +4565,10 @@ const I18N = {
     srcCont: '正文容器', srcRe: '目录章节正则', srcAdv: '高级:直接编辑 JSON',
     srcSave: '保存书源', srcDel: '删除', srcEmpty: '暂无自定义书源',
     srcSaved: '已保存,立即生效', srcErr: '保存失败', srcNeedName: '请填写书源名称和主页',
+    srcNeedCont: '请填正文容器(或点上方🪄自动识别,最省事)',
+    srcProbe: '自动识别', srcProbePh: '粘贴这本书的任意章节页 URL,自动识别书源配置',
+    srcProbing: '识别中...', srcProbeOk: '已识别,检查下方配置后点保存', srcProbeFail: '识别失败',
+    srcProbeDet: '识别到', tipProbe: '粘贴一个章节页,自动探测编码/正文容器/分页,生成书源配置',
     tipSrcMgr: '管理书源:增删改查,保存即生效',
     tipGo: '按当前设置转换所选文件(可先看右侧预览)', tipMerge: '只合并 TXT,不调用 Calibre 转换',
     tipGrab: '粘贴小说目录页或章节页网址后点击,抓取结果自动存入书库', tipGrabCancel: '取消正在进行的抓取',
@@ -4507,6 +4612,10 @@ const I18N = {
     srcCont: 'Content container', srcRe: 'TOC chapter regex', srcAdv: 'Advanced: edit JSON',
     srcSave: 'Save source', srcDel: 'Delete', srcEmpty: 'no custom sources yet',
     srcSaved: 'saved - active now', srcErr: 'save failed', srcNeedName: 'fill in name and home URL',
+    srcNeedCont: 'fill the content container - or just use 🪄 Auto-detect',
+    srcProbe: 'Auto-detect', srcProbePh: 'paste any chapter URL of the book - auto-detect source config',
+    srcProbing: 'detecting...', srcProbeOk: 'detected - check the config below, then Save', srcProbeFail: 'detection failed',
+    srcProbeDet: 'detected', tipProbe: 'Paste a chapter URL to auto-detect encoding/container/paging',
     tipSrcMgr: 'Manage sources: add/remove, active immediately',
     tipGo: 'Convert selected files with current settings (see preview first)', tipMerge: 'Merge TXT only, no Calibre conversion',
     tipGrab: 'Paste a novel TOC/chapter URL, result is saved to the library', tipGrabCancel: 'Cancel the running grab',
@@ -5643,6 +5752,46 @@ const SRC_TEMPLATE = JSON.stringify({
 
 srcMgrBtn.addEventListener('click', () => { srcPanel.style.display = srcPanel.style.display === 'none' ? 'block' : 'none'; });
 
+const srcProbeUrl = document.getElementById('srcProbeUrl');
+const srcProbeBtn = document.getElementById('srcProbeBtn');
+const srcProbeMsg = document.getElementById('srcProbeMsg');
+
+srcProbeBtn.addEventListener('click', async () => {
+  const url = srcProbeUrl.value.trim();
+  if (!url) return;
+  srcProbeMsg.className = 'srcmsg';
+  srcProbeMsg.textContent = t('srcProbing') + '...';
+  try {
+    const r = await fetch('/sources/probe', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || '');
+    const d = j.detected || {};
+    const bits = [t('srcProbeDet') + ': ' + (d.encoding || 'auto') + ' · '
+      + (d.chapter_pages > 1 ? (d.chapter_pages + ' 页分页') : '单页') + ' · '
+      + (d.cjk_chars || 0) + ' 字'];
+    if (d.container) bits.push((d.container.tag || '') + '.' + (d.container.id || d.container.class || ''));
+    srcProbeMsg.className = 'srcmsg ok';
+    srcProbeMsg.textContent = '✅ ' + t('srcProbeOk') + ' (' + bits.join(' · ') + ')';
+    const s = j.suggest || {};
+    srcName.value = s.name || '';
+    srcHome.value = s.home || '';
+    srcEnc.value = s.encoding || 'utf-8';
+    const sel = ((s.chapter || {}).content || [])[0] || {};
+    srcContTag.value = sel.tag || 'div';
+    srcContAttr.value = sel.id ? 'id' : 'class';
+    srcContVal.value = sel.id || sel.class || '';
+    srcTocRe.value = ((s.toc || {}).link_re || '').replace(/\\/g, '\\');
+    srcJson.value = JSON.stringify(s, null, 2);
+  } catch (e) {
+    srcProbeMsg.className = 'srcmsg err';
+    srcProbeMsg.textContent = '❌ ' + t('srcProbeFail') + ': ' + e.message;
+  }
+});
+srcProbeUrl.placeholder = t('srcProbePh');
+
 async function renderSrcList() {
   try {
     const r = await fetch('/sources');
@@ -5686,6 +5835,11 @@ srcSave.addEventListener('click', async () => {
   const tocRe = srcTocRe.value.trim();
   if (!name || !home) {
     srcMsg.className = 'srcmsg err'; srcMsg.textContent = '❌ ' + t('srcNeedName');
+    return;
+  }
+  if (!srcJson.value.trim() && !srcContVal.value.trim()) {
+    srcMsg.className = 'srcmsg err';
+    srcMsg.textContent = '❌ ' + t('srcNeedCont');
     return;
   }
   let src = null;
