@@ -2301,6 +2301,10 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_clear_history()
         elif self.path == "/config":
             self.handle_set_config()
+        elif self.path == "/sources":
+            self.handle_sources_save()
+        elif self.path == "/sources/delete":
+            self.handle_sources_delete()
         elif self.path == "/grab":
             self.handle_grab()
         elif self.path == "/convert_lib":
@@ -3097,6 +3101,55 @@ class Handler(BaseHTTPRequestHandler):
              "home": s.get("home") or "",
              "encoding": s.get("encoding") or "auto"}
             for s in SOURCES.values()]})
+
+    def handle_sources_save(self):
+        """POST /sources: add or update a book source (written to
+        sources/<id>.json, loaded into memory immediately)."""
+        data = self._read_json_body()
+        src = data.get("source")
+        if not isinstance(src, dict) or not src.get("id"):
+            self._json(400, {"error": "书源缺少 id"})
+            return
+        sid = str(src["id"]).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sid):
+            self._json(400, {"error": "书源 id 仅支持字母、数字、下划线、连字符"})
+            return
+        if not src.get("home"):
+            self._json(400, {"error": "请填写站点主页 URL"})
+            return
+        if not src.get("name"):
+            src["name"] = sid
+        # auto url_re from the home domain when missing
+        if not src.get("url_re"):
+            dom = urlparse(src["home"]).netloc
+            src["url_re"] = re.escape(dom)
+        try:
+            SOURCES_DIR.mkdir(parents=True, exist_ok=True)
+            path = SOURCES_DIR / (sid + ".json")
+            path.write_text(json.dumps(src, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+        except OSError as e:
+            self._json(500, {"error": f"保存失败: {e}"})
+            return
+        src["_file"] = path.name
+        SOURCES[sid] = src
+        self._json(200, {"ok": True, "id": sid})
+
+    def handle_sources_delete(self):
+        """POST /sources/delete: remove a book source."""
+        data = self._read_json_body()
+        sid = (data.get("id") or "").strip()
+        src = SOURCES.get(sid)
+        if not src:
+            self._json(404, {"error": "书源不存在"})
+            return
+        path = SOURCES_DIR / (src.get("_file") or (sid + ".json"))
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        SOURCES.pop(sid, None)
+        self._json(200, {"ok": True})
 
     def handle_grab(self):
         """Start a background grab job: a chapter page or a whole book from a
@@ -3973,6 +4026,27 @@ INDEX_HTML = r"""<!DOCTYPE html>
     white-space:pre-wrap; word-break:break-all;
   }
   .grabLog.show { display:block; }
+  .srcmgr { margin-top:10px; }
+  .srcpanel { margin-top:8px; border:1px solid var(--border); border-radius:10px; padding:10px; background:var(--card); }
+  .srclist .srcitem {
+    display:flex; align-items:center; gap:8px; padding:6px 8px; margin-bottom:5px;
+    background:var(--bg2); border:1px solid var(--border); border-radius:8px; font-size:12px;
+  }
+  .srcitem .snm { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .srcitem .smeta { color:var(--muted); font-size:11px; white-space:nowrap; }
+  .srcitem .sdel { background:none; border:1px solid var(--border); color:var(--muted); border-radius:6px; font-size:11px; padding:1px 7px; cursor:pointer; }
+  .srcitem .sdel:hover { color:var(--err); border-color:var(--err); }
+  .srcadd { margin-top:8px; }
+  .srcadd summary, .srcadv summary { font-size:12px; color:var(--accent); cursor:pointer; padding:4px 0; }
+  .srcrow { display:flex; gap:6px; align-items:center; margin:6px 0; flex-wrap:wrap; }
+  .srcrow label { font-size:12px; color:var(--muted); min-width:64px; }
+  .srcrow input[type=text], .srcrow input[type=url], .srcrow select, .srcadv textarea {
+    padding:6px 8px; border-radius:7px; border:1px solid var(--border);
+    background:var(--bg2); color:var(--fg); font-size:12px; flex:1; min-width:120px;
+  }
+  .srcadv textarea { width:100%; font-family:monospace; }
+  .srcmsg { font-size:11px; }
+  .srcmsg.ok { color:var(--ok); } .srcmsg.err { color:var(--err); }
   .rurlrow { margin:12px 0; }
   .rurlrow input {
     width:100%; box-sizing:border-box; padding:11px 13px; border-radius:10px;
@@ -4238,6 +4312,38 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="grabstatus" id="grabStatus"></div>
         <div class="grabprog" id="grabProg"><div class="bar"><i id="grabBar"></i></div><span id="grabPct">0%</span></div>
         <div class="grabLog" id="grabLog"></div>
+        <div class="srcmgr">
+          <button class="btn tiny" id="srcMgrBtn" data-tip="tipSrcMgr">⚙️ <span data-i18n="srcMgr"></span></button>
+          <div class="srcpanel" id="srcPanel" style="display:none">
+            <div class="srclist" id="srcList"></div>
+            <details class="srcadd">
+              <summary data-i18n="srcAdd"></summary>
+              <div class="srcrow"><label data-i18n="srcName"></label><input type="text" id="srcName"></div>
+              <div class="srcrow"><label data-i18n="srcHome"></label><input type="url" id="srcHome" placeholder="https://..."></div>
+              <div class="srcrow"><label data-i18n="srcEnc"></label>
+                <select id="srcEnc">
+                  <option value="utf-8">UTF-8</option>
+                  <option value="gbk">GBK</option>
+                  <option value="">自动</option>
+                </select>
+              </div>
+              <div class="srcrow"><label data-i18n="srcCont"></label>
+                <input type="text" id="srcContTag" value="div" style="width:56px">
+                <select id="srcContAttr"><option value="id">id</option><option value="class">class</option></select>
+                <input type="text" id="srcContVal" placeholder="content">
+              </div>
+              <div class="srcrow"><label data-i18n="srcRe"></label><input type="text" id="srcTocRe" placeholder="第\\s*[0-9零一二三四五六七八九十百千两万]+\\s*[章节回卷]"></div>
+              <details class="srcadv">
+                <summary data-i18n="srcAdv"></summary>
+                <textarea id="srcJson" rows="10" spellcheck="false"></textarea>
+              </details>
+              <div class="srcrow">
+                <button class="btn" id="srcSave" data-i18n="srcSave"></button>
+                <span class="srcmsg" id="srcMsg"></span>
+              </div>
+            </details>
+          </div>
+        </div>
       </div>
       <div class="rrecent">
         <div class="rrecenthead"><span data-i18n="rRecent"></span><button class="rclear" id="rClearRecent" data-i18n="rClearRecent" data-tip="tipClearRecent"></button></div>
@@ -4354,6 +4460,11 @@ const I18N = {
     webSourceAuto: '自动识别书源', webGo: '抓取', webCancel: '取消',
     webNoUrl: '请先输入网址', webStart: '开始抓取...', webRead: '阅读',
     webConvert: '转电子书', webDone: '抓取完成', webAds: '清理广告', rUrlLabel: '网址', rClearRecent: '清空',
+    srcMgr: '书源管理', srcAdd: '➕ 添加书源', srcName: '书源名称', srcHome: '站点主页', srcEnc: '编码',
+    srcCont: '正文容器', srcRe: '目录章节正则', srcAdv: '高级:直接编辑 JSON',
+    srcSave: '保存书源', srcDel: '删除', srcEmpty: '暂无自定义书源',
+    srcSaved: '已保存,立即生效', srcErr: '保存失败', srcNeedName: '请填写书源名称和主页',
+    tipSrcMgr: '管理书源:增删改查,保存即生效',
     tipGo: '按当前设置转换所选文件(可先看右侧预览)', tipMerge: '只合并 TXT,不调用 Calibre 转换',
     tipGrab: '粘贴小说目录页或章节页网址后点击,抓取结果自动存入书库', tipGrabCancel: '取消正在进行的抓取',
     tipCancel: '取消当前正在转换/抓取的任务', tipReaderUrl: '粘贴小说网址(目录页/章节页),抓取后自动打开阅读',
@@ -4392,6 +4503,11 @@ const I18N = {
     webSourceAuto: 'Auto-detect source', webGo: 'Fetch', webCancel: 'Cancel',
     webNoUrl: 'Enter a URL first', webStart: 'Fetching...', webRead: 'Read',
     webConvert: 'Convert', webDone: 'Fetched', webAds: 'Clean ads', rUrlLabel: 'URL', rClearRecent: 'Clear',
+    srcMgr: 'Source manager', srcAdd: '➕ Add source', srcName: 'Name', srcHome: 'Site home', srcEnc: 'Encoding',
+    srcCont: 'Content container', srcRe: 'TOC chapter regex', srcAdv: 'Advanced: edit JSON',
+    srcSave: 'Save source', srcDel: 'Delete', srcEmpty: 'no custom sources yet',
+    srcSaved: 'saved - active now', srcErr: 'save failed', srcNeedName: 'fill in name and home URL',
+    tipSrcMgr: 'Manage sources: add/remove, active immediately',
     tipGo: 'Convert selected files with current settings (see preview first)', tipMerge: 'Merge TXT only, no Calibre conversion',
     tipGrab: 'Paste a novel TOC/chapter URL, result is saved to the library', tipGrabCancel: 'Cancel the running grab',
     tipCancel: 'Cancel the running conversion/grab job', tipReaderUrl: 'Paste a novel URL (TOC/chapter), auto-opens in the reader after fetching',
@@ -5503,6 +5619,114 @@ grabCancelBtn.addEventListener('click', async () => {
 });
 grabUrl.addEventListener('keydown', (e) => { if (e.key === 'Enter') startGrab(); });
 
+// ================= source manager =================
+const srcMgrBtn = document.getElementById('srcMgrBtn');
+const srcPanel = document.getElementById('srcPanel');
+const srcList = document.getElementById('srcList');
+const srcName = document.getElementById('srcName');
+const srcHome = document.getElementById('srcHome');
+const srcEnc = document.getElementById('srcEnc');
+const srcContTag = document.getElementById('srcContTag');
+const srcContAttr = document.getElementById('srcContAttr');
+const srcContVal = document.getElementById('srcContVal');
+const srcTocRe = document.getElementById('srcTocRe');
+const srcJson = document.getElementById('srcJson');
+const srcSave = document.getElementById('srcSave');
+const srcMsg = document.getElementById('srcMsg');
+
+const SRC_TEMPLATE = JSON.stringify({
+  id: 'my_site', name: '我的站 (UTF-8)', home: 'https://www.example.com',
+  url_re: 'example\\.com', encoding: 'utf-8',
+  toc: { link_re: '第\\s*[0-9零一二三四五六七八九十百千两万]+\\s*[章节回卷]', dedupe: 'keep_last' },
+  chapter: { title: [{ tag: 'h1' }], content: [{ tag: 'div', id: 'content' }], pagination: true },
+}, null, 2);
+
+srcMgrBtn.addEventListener('click', () => { srcPanel.style.display = srcPanel.style.display === 'none' ? 'block' : 'none'; });
+
+async function renderSrcList() {
+  try {
+    const r = await fetch('/sources');
+    const j = await r.json();
+    const list = j.sources || [];
+    if (!list.length) {
+      srcList.innerHTML = '<div class="srcitem">' + esc(t('srcEmpty')) + '</div>';
+    } else {
+      srcList.innerHTML = list.map(s => {
+        const builtin = ['biquge5200_cc', 'b5200_net', '88biquge', 'sudugu'].includes(s.id);
+        return '<div class="srcitem"><span class="snm">' + esc(s.name) + '</span>'
+          + '<span class="smeta">' + esc(s.encoding || 'auto') + '</span>'
+          + '<button class="sdel" data-id="' + esc(s.id) + '"' + (builtin ? ' style="display:none"' : '') + '>' + esc(t('srcDel')) + '</button></div>';
+      }).join('');
+    }
+    srcList.querySelectorAll('.sdel').forEach(b => {
+      b.addEventListener('click', async () => {
+        if (!confirm(lang === 'zh' ? ('删除书源 ' + b.dataset.id + ' ?') : ('Delete source ' + b.dataset.id + ' ?'))) return;
+        try {
+          const r = await fetch('/sources/delete', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: b.dataset.id }),
+          });
+          const j = await r.json();
+          if (!j.ok) throw new Error(j.error || '');
+        } catch (e) { srcMsg.className = 'srcmsg err'; srcMsg.textContent = '❌ ' + e.message; }
+        await Promise.all([renderSrcList(), loadSources()]);
+      });
+    });
+  } catch (e) {}
+}
+
+srcSave.addEventListener('click', async () => {
+  srcMsg.className = 'srcmsg'; srcMsg.textContent = '';
+  const name = srcName.value.trim();
+  const home = srcHome.value.trim();
+  const enc = srcEnc.value;
+  const tag = srcContTag.value.trim() || 'div';
+  const attr = srcContAttr.value;
+  const val = srcContVal.value.trim();
+  const tocRe = srcTocRe.value.trim();
+  if (!name || !home) {
+    srcMsg.className = 'srcmsg err'; srcMsg.textContent = '❌ ' + t('srcNeedName');
+    return;
+  }
+  let src = null;
+  const adv = srcJson.value.trim();
+  if (adv) {
+    try { src = JSON.parse(adv); } catch (e) {
+      srcMsg.className = 'srcmsg err'; srcMsg.textContent = '❌ JSON: ' + e.message;
+      return;
+    }
+  }
+  if (!src) {
+    const id = name.replace(/[^A-Za-z0-9_-]/g, '_').toLowerCase() || 'mysite';
+    src = { id: id, name: name, home: home, encoding: enc || 'utf-8' };
+    src.toc = { link_re: tocRe || '第\\s*[0-9零一二三四五六七八九十百千两万]+\\s*[章节回卷]', dedupe: 'keep_last' };
+    if (val) {
+      const sel = { tag: tag };
+      sel[attr] = val;
+      src.chapter = { title: [{ tag: 'h1' }], content: [sel], pagination: true };
+    }
+  }
+  try {
+    const r = await fetch('/sources', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: src }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || '');
+    srcMsg.className = 'srcmsg ok';
+    srcMsg.textContent = '✅ ' + t('srcSaved');
+    srcJson.value = '';
+    await Promise.all([renderSrcList(), loadSources()]);
+  } catch (e) {
+    srcMsg.className = 'srcmsg err'; srcMsg.textContent = '❌ ' + e.message;
+  }
+});
+
+srcJson.addEventListener('focus', () => {
+  if (!srcJson.value.trim()) srcJson.value = SRC_TEMPLATE;
+});
+
+
 // ================= multi-job progress =================
 let activeJobs = new Set();
 let lastJobId = null;
@@ -5676,6 +5900,7 @@ loadBgList().then(() => {
 });
 refreshHistory();
 loadSources();
+renderSrcList();
 
 // ================= reader =================
 const rPrev = document.getElementById('rPrev');
