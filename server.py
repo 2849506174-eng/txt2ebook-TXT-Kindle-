@@ -3913,8 +3913,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
     padding:5px 8px; border:1px solid var(--border); border-radius:8px;
     background:var(--bg); color:var(--fg); font-size:12px; max-width:34vw;
   }
-  .ropen { flex:1; display:flex; align-items:center; justify-content:center; padding:24px; overflow-y:auto; }
-  .ropenbox { width:100%; max-width:520px; }
+  .ropen { flex:1; display:block; overflow-y:auto; padding:24px; }
+  .ropenbox { width:100%; max-width:520px; margin:0 auto; }
   .ropenbox h2 { margin:0 0 8px; font-size:20px; }
   .rnote { color:var(--muted); font-size:13px; margin:0 0 18px; line-height:1.6; }
   .rrecent { margin-top:16px; }
@@ -4391,8 +4391,8 @@ const I18N = {
     webNoUrl: '请先输入网址', webStart: '开始抓取...', webRead: '阅读',
     webConvert: '转电子书', webDone: '抓取完成', webAds: '清理广告', rUrlLabel: '网址', rClearRecent: '清空',
     webSearch: '搜书', webSearchPh: '输入书名,在各书源站搜索(可搜到即点即抓)', webSearching: '搜索中...',
-    webSearchEmpty: '没有找到结果', webSearchFail: '搜索失败', webPick: '点击抓取该书',
-    webQueued: '已提交,等待/抓取中(可继续点其他结果,自动排队)',
+    webSearchEmpty: '没有找到结果', webSearchFail: '搜索失败', webPick: '点击结果:填入网址后手动抓取',
+    webFilled: '已填入,点「抓取」开始(按目录页整本抓取)',
     tipSearch: '输入书名,在支持站内搜索的书源站查找同名书',
     tipGo: '按当前设置转换所选文件(可先看右侧预览)', tipMerge: '只合并 TXT,不调用 Calibre 转换',
     tipGrab: '粘贴小说目录页或章节页网址后点击,抓取结果自动存入书库', tipGrabCancel: '取消正在进行的抓取',
@@ -4433,8 +4433,8 @@ const I18N = {
     webNoUrl: 'Enter a URL first', webStart: 'Fetching...', webRead: 'Read',
     webConvert: 'Convert', webDone: 'Fetched', webAds: 'Clean ads', rUrlLabel: 'URL', rClearRecent: 'Clear',
     webSearch: 'Search', webSearchPh: 'Search a title across sources, click a hit to fetch', webSearching: 'Searching...',
-    webSearchEmpty: 'no results', webSearchFail: 'search failed', webPick: 'click to fetch',
-    webQueued: 'submitted - queued/fetching (click more results, they queue up)',
+    webSearchEmpty: 'no results', webSearchFail: 'search failed', webPick: 'click a hit to fill the URL, then fetch',
+    webFilled: 'filled - click Fetch to start (whole book from TOC)',
     tipSearch: 'Search a title on sources that support site search',
     tipGo: 'Convert selected files with current settings (see preview first)', tipMerge: 'Merge TXT only, no Calibre conversion',
     tipGrab: 'Paste a novel TOC/chapter URL, result is saved to the library', tipGrabCancel: 'Cancel the running grab',
@@ -5555,17 +5555,16 @@ async function doSearch() {
         }).join('');
     grabSearchResults.querySelectorAll('.gsitem').forEach(el => {
       el.addEventListener('click', () => {
-        if (el.classList.contains('picked')) return;
         const h = hits[+el.dataset.i];
         if (!h) return;
-        // mark as submitted so double-clicks never spawn duplicate jobs
-        el.classList.add('picked');
-        const go = el.querySelector('.gsgo');
-        if (go) go.textContent = '⏳';
-        el.title = t('webQueued');
+        // fill the URL and switch to TOC mode (search hits are book TOC
+        // pages); the user clicks 抓取 to start - no auto-fetching
         grabUrl.value = h.url;
+        grabMode.value = 'toc';
+        grabStatus.className = 'grabstatus ok';
+        grabStatus.textContent = '✅ ' + esc(h.title)
+          + (h.author ? ' · ' + esc(h.author) : '') + ' — ' + t('webFilled');
         grabUrl.focus();
-        startGrab();
       });
     });
   } catch (e) {
